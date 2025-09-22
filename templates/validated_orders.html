@@ -1,0 +1,94 @@
+{% extends "_layout.html" %}
+
+{% block title %}{{ page_title }} - AWB Hub{% endblock %}
+
+{% block content %}
+<div class="container">
+    <h1 class="title">{{ page_title }}</h1>
+    <p class="subtitle">
+        Aici sunt listate comenzile marcate ca având o adresă validă, sortate după cel mai mic scor de încredere.
+        Găsite: <strong>{{ total_orders }}</strong> comenzi.
+    </p>
+
+    {% if orders %}
+    <div class="table-container">
+        <table class="table is-bordered is-striped is-narrow is-hoverable is-fullwidth">
+            <thead>
+                <tr>
+                    <th>Comandă</th>
+                    <th>Client</th>
+                    <th>Adresă</th>
+                    <th>Validare</th>
+                    <th>Acțiuni</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for order in orders %}
+                <tr>
+                    <td>
+                        <a href="https://{{ order.store.domain }}/admin/orders/{{ order.shopify_order_id.split('/')[-1] }}" target="_blank">
+                            {{ order.name }}
+                        </a><br>
+                        <small>{{ order.store.name }}</small>
+                    </td>
+                    <td>{{ order.customer }}<br><small>{{ order.shipping_phone }}</small></td>
+                    <td>
+                        {{ order.shipping_address1 }}<br>
+                        {% if order.shipping_address2 %}{{ order.shipping_address2 }}<br>{% endif %}
+                        {{ order.shipping_city }}, {{ order.shipping_zip }}<br>
+                        {{ order.shipping_province }}, {{ order.shipping_country }}
+                    </td>
+                    <td>
+                        <span class="tag is-success is-light">Scor: {{ order.address_score or 'N/A' }}</span>
+                        {% if order.address_validation_errors %}
+                            <div class="content is-small" style="margin-top: 5px;">
+                                <ul>
+                                    {% for error in order.address_validation_errors %}
+                                        <li>{{ error }}</li>
+                                    {% endfor %}
+                                </ul>
+                            </div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <button class="button is-small is-warning mark-invalid-btn" data-order-id="{{ order.id }}">
+                            Marchează ca Invalidă
+                        </button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <nav class="pagination is-centered" role="navigation" aria-label="pagination">
+        <ul class="pagination-list">
+            {% for p in page_numbers %}
+                {% if p == '...' %}
+                    <li><span class="pagination-ellipsis">&hellip;</span></li>
+                {% elif p == page %}
+                    <li><a class="pagination-link is-current" aria-label="Page {{ p }}" aria-current="page">{{ p }}</a></li>
+                {% else %}
+                    <li><a class="pagination-link" href="{{ request.url.remove_query_params('page').include_query_params(page=p) }}">{{ p }}</a></li>
+                {% endif %}
+            {% endfor %}
+        </ul>
+    </nav>
+
+    {% else %}
+    <div class="notification is-info">
+        Nicio comandă validată nu a fost găsită.
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // Aici se poate adăuga JavaScript pentru a marca o adresă ca invalidă,
+    // dacă vrei să implementezi și funcționalitatea butonului.
+    // De exemplu, un apel fetch către un nou endpoint care schimbă statusul.
+});
+</script>
+{% endblock %}

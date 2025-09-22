@@ -1,0 +1,72 @@
+{% extends "_layout.html" %}
+
+{% block title %}{{ page_title }} - AWB Hub{% endblock %}
+
+{% block content %}
+<div class="container">
+    <h1 class="title">{{ page_title }}</h1>
+    <p class="subtitle">
+        Comenzi cu adresa validată, gata pentru generare AWB.
+        Găsite: <strong>{{ total_orders }}</strong> comenzi.
+    </p>
+
+    {% if orders %}
+    <div class="table-container">
+        <table class="table is-bordered is-striped is-narrow is-hoverable is-fullwidth">
+            <thead>
+                <tr>
+                    <th><input type="checkbox" id="master-checkbox"></th>
+                    <th>Comandă</th>
+                    <th>Dată</th>
+                    <th>Client / Telefon</th>
+                    <th>Adresă</th>
+                    <th>Produse</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for order in orders %}
+                <tr>
+                    <td><input type="checkbox" class="order-checkbox" data-order-id="{{ order.id }}"></td>
+                    <td>
+                        <a href="https://{{ order.store.domain }}/admin/orders/{{ order.shopify_order_id.split('/')[-1] }}" target="_blank" title="Vezi în Shopify">
+                            {{ order.name }}
+                        </a><br>
+                        <small>{{ order.store.name }}</small>
+                    </td>
+                    <td>{{ order.created_at | localtime | strftime('%d-%m-%Y %H:%M') }}</td>
+                    <td>{{ order.customer }}<br><small>{{ order.shipping_phone }}</small></td>
+                    <td>
+                        {{ order.shipping_address1 }}<br>
+                        {% if order.shipping_address2 %}{{ order.shipping_address2 }}<br>{% endif %}
+                        {{ order.shipping_city }}, {{ order.shipping_zip }}
+                    </td>
+                    <td>
+                        <div class="content is-small">
+                            <ul>
+                                {% for item in order.line_items %}
+                                <li>{{ item.quantity }}x {{ item.title }} ({{ item.sku }})</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% include '_pagination.html' %}
+    
+    {% else %}
+    <div class="notification is-info mt-4">
+        Nicio comandă gata de procesare nu a fost găsită. Rulează o sincronizare pentru a aduce comenzi noi.
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Aici vom adăuga logica pentru butoanele de generare AWB-uri.
+</script>
+{% endblock %}
