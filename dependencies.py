@@ -1,27 +1,10 @@
-# dependencies.py
-from fastapi.templating import Jinja2Templates
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from templating import templates
+# dependencies.py — central place to expose the Jinja templates and helpers
+from templating import get_templates  # reuse the single instance from templating.py
 
-
-
-ROMANIA_TZ = ZoneInfo("Europe/Bucharest")
-
-def to_local_time(utc_dt: datetime):
-    if utc_dt is None:
-        return None
-    return utc_dt.astimezone(ROMANIA_TZ)
-
-templates = Jinja2Templates(directory="templates")
-templates.env.filters['localtime'] = to_local_time
-
-def get_templates():
-    return templates
-
-# MODIFICARE: Am adăugat funcția de paginare
 def get_pagination_numbers(current_page: int, total_pages: int, context_size: int = 2) -> list:
-    """Generează o listă de numere de pagină pentru controalele de paginare."""
+    """Generează o listă de numere de pagină pentru controalele de paginare.
+    Exemplu: [1, '...', 4, 5, 6, '...', 12]
+    """
     if total_pages <= 1:
         return []
 
@@ -33,12 +16,12 @@ def get_pagination_numbers(current_page: int, total_pages: int, context_size: in
         page_numbers.append(1)
         if start_page > 2:
             page_numbers.append('...')
-    
+
     page_numbers.extend(range(start_page, end_page + 1))
 
     if end_page < total_pages:
         if end_page < total_pages - 1:
             page_numbers.append('...')
         page_numbers.append(total_pages)
-        
+
     return page_numbers

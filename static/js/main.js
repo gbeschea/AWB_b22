@@ -153,8 +153,10 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function startSync(url, body, options = {}) {
-        fetch(url, { method: 'POST', body: body, ...options }).then(res => res.status === 409 && res.json().then(d => alert(d.message)));
+        fetch(url, { method: 'POST', body, ...options })
+            .then(res => res.status === 409 && res.json().then(d => alert(d.message)));
     }
+
     document.getElementById('syncOrdersButton')?.addEventListener('click', () => startSync('/sync/orders', new URLSearchParams(new FormData(document.getElementById('days-form')))));
     document.getElementById('syncCouriersButton')?.addEventListener('click', () => startSync('/sync/couriers', new FormData()));
     document.getElementById('fullSyncButton')?.addEventListener('click', function() {
