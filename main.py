@@ -1,17 +1,25 @@
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+
 from routes import (
     store_categories, printing, logs, orders, sync, labels,
     settings as settings_router, validation, webhooks, couriers, background, processing
 )
 from websocket_manager import manager
 from settings import settings
+from database import engine
+
+# Optional: close shared HTTP client used by courier services
+try:
+    from services.couriers import _http_client as couriers_http_client
+except Exception:
+    couriers_http_client = None
 
 app = FastAPI(
     title="AWB Hub",
-    description="Aplicator pentru managementul comenzilor și generarea de AWB-uri.",
+    description="Aplicatie pentru managementul comenzilor și generarea de AWB-uri.",
     version="1.0.0"
 )
 
@@ -41,16 +49,48 @@ app.include_router(logs.router, tags=["Logs"])
 app.include_router(store_categories.router, tags=["Store Categories"])
 app.include_router(background.router, tags=["Background Tasks"])
 
+@app.on_event("startup")
+async def on_startup():
+    # Ensure the supporting view used by filter_service exists
+    view_sql = """
+    CREATE OR REPLACE VIEW orders_view AS
+    WITH latest_shipment AS (
+      SELECT s.order_id, s.last_status, s.last_status_at, s.id,
+             ROW_NUMBER() OVER (PARTITION BY s.order_id ORDER BY s.last_status_at NULLS LAST, s.id DESC) AS rn
+      FROM shipments s
+    )
+    SELECT
+      o.id,
+      CASE
+        WHEN ls.last_status ILIKE 'delivered%%' OR ls.last_status ILIKE '%%livrat%%' THEN 'delivered'
+        WHEN ls.last_status ILIKE '%%refus%%' OR ls.last_status ILIKE '%%return%%' THEN 'refused'
+        WHEN ls.last_status ILIKE '%%cancel%%' OR ls.last_status ILIKE '%%anulat%%' THEN 'canceled'
+        WHEN ls.last_status ILIKE '%%locker%%' OR ls.last_status ILIKE '%%parcelshop%%' OR ls.last_status ILIKE '%%pick-up%%' THEN 'pickup_office'
+        WHEN ls.last_status ILIKE '%%in curs%%' OR ls.last_status ILIKE '%%tranzit%%' OR ls.last_status ILIKE 'out for delivery%%' OR ls.last_status ILIKE 'in transit%%' THEN 'in_transit'
+        WHEN ls.last_status ILIKE '%%expediat%%' OR ls.last_status ILIKE '%%warehouse%%' OR ls.last_status ILIKE '%%pick-up%%' THEN 'shipped'
+        WHEN ls.last_status ILIKE '%%proces%%' OR ls.last_status ILIKE '%%registered%%' OR ls.last_status ILIKE '%%awb%%' THEN 'processed'
+        ELSE NULL
+      END AS mapped_courier_status
+    FROM orders o
+    LEFT JOIN latest_shipment ls ON ls.order_id = o.id AND ls.rn = 1;
+    """
+    async with engine.begin() as conn:
+        await conn.execute(text(view_sql))
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    if couriers_http_client:
+        try:
+            await couriers_http_client.aclose()
+        except Exception:
+            pass
+
 @app.websocket("/ws/status")
 async def websocket_endpoint(websocket: WebSocket):
-    """Endpoint pentru status live."""
     await manager.connect(websocket)
     try:
         while True:
+            # Keep the connection alive; no server-side receive is required
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-
-@app.get("/", tags=["Root"])
-def read_root():
-    return {"message": "AWB Hub is running."}

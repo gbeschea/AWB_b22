@@ -24,7 +24,7 @@ async def get_print_logs_page(
     total_logs = total_logs_res.scalar_one() or 0
     paginated_logs_res = await db.execute(logs_query.offset((page - 1) * page_size).limit(page_size))
     paginated_logs = paginated_logs_res.scalars().all()
-    
+
     for log in paginated_logs:
         awbs = [entry.awb for entry in log.entries]
         if awbs:
@@ -39,20 +39,13 @@ async def get_print_logs_page(
         else:
             log.summary_items = []
 
-    total_pages = (total_logs + page_size - 1) // page_size if total_logs > 0 else 1
-    page_numbers = get_pagination_numbers(page, total_pages)
-            
-    return templates.TemplateResponse("print_logs.html", {
-        "request": request, "logs": paginated_logs, "page": page, 
-        "total_pages": total_pages, "page_numbers": page_numbers
-    })
+    total_pages = (total_logs + page_size - 1) // page_size  # fix here
+    pagination_numbers = get_pagination_numbers(page, total_pages)
 
-@router.get("/print/download/{log_id}", response_class=FileResponse, name="download_printed_pdf")
-async def download_printed_pdf(log_id: int, db: AsyncSession = Depends(get_db)):
-    log_entry = await db.get(models.PrintLog, log_id)
-    if not log_entry or not log_entry.pdf_path:
-        raise HTTPException(status_code=404, detail="Fișierul PDF nu a fost găsit în log.")
-    file_path = Path(log_entry.pdf_path)
-    if not file_path.is_file():
-        raise HTTPException(status_code=404, detail="Fișierul PDF nu mai există pe disc.")
-    return FileResponse(path=file_path, media_type='application/pdf', filename=file_path.name)
+    return templates.TemplateResponse("print_logs.html", {
+        "request": request,
+        "logs": paginated_logs,
+        "page": page,
+        "total_pages": total_pages,
+        "pagination_numbers": pagination_numbers,
+    })

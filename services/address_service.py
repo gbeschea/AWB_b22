@@ -543,15 +543,14 @@ async def validate_address_for_order(db: AsyncSession, order: Any) -> Validation
         if best_st:
             suggestions.append(f"strada_standardizata={best_st}")
 
-    
-status = "valid"
-# If minimum business rules failed (e.g., missing street/number), keep it invalid
-if 'hard_invalid' in locals() and hard_invalid:
-    status = "invalid"
-elif score < 60:
-    status = "invalid"
-elif score < 85:
-    status = "partial_match"
+    status = "valid"
+    if 'hard_invalid' in locals() and hard_invalid:
+        status = "invalid"
+    elif score < 60:
+        status = "invalid"
+    elif score < 85:
+        status = "partial_match"
 
-_set_order_fields(order, status, score, errors, suggestions)
-return ValidationResult(status=="valid", score, errors, suggestions)
+    _set_order_fields(order, status, score, errors, suggestions)
+    # return opțional; UI nu îl folosește dar e util la teste/unit
+    return ValidationResult(status == "valid", score, errors, suggestions)

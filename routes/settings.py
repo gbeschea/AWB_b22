@@ -34,10 +34,16 @@ async def get_stores_page(request: Request, db: AsyncSession = Depends(get_db), 
 
 @router.post("/stores/{store_id}", name="update_store")
 async def update_store_entry(
-    store_id: int, db: AsyncSession = Depends(get_db), name: str = Form(...),
-    domain: str = Form(...), shared_secret: str = Form(""), access_token: str = Form(""),
-    is_active: str = Form("false"), paper_size: str = Form(...),
-    dpd_client_id: Optional[str] = Form(None), pii_source: str = Form(...),
+    store_id: int,
+    db: AsyncSession = Depends(get_db),
+    name: str = Form(...),
+    domain: str = Form(...),
+    shared_secret: str = Form(""),
+    access_token: str = Form(""),
+    is_active: str = Form("false"),
+    paper_size: str = Form(...),
+    dpd_client_id: Optional[str] = Form(None),
+    pii_source: str = Form(...),
     category_ids: List[str] = Form([])
 ):
     is_active_bool = is_active.lower() == 'true'
