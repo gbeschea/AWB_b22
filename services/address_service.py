@@ -543,6 +543,7 @@ async def validate_address_for_order(db: AsyncSession, order: Any) -> Validation
         if best_st:
             suggestions.append(f"strada_standardizata={best_st}")
 
+    # -------------- FINAL validate_address_for_order(...) --------------
     status = "valid"
     if 'hard_invalid' in locals() and hard_invalid:
         status = "invalid"
@@ -552,5 +553,11 @@ async def validate_address_for_order(db: AsyncSession, order: Any) -> Validation
         status = "partial_match"
 
     _set_order_fields(order, status, score, errors, suggestions)
-    # return opțional; UI nu îl folosește dar e util la teste/unit
-    return ValidationResult(status == "valid", score, errors, suggestions)
+
+    # opțional: și un return programatic (util în teste/CLI)
+    from schemas import ValidationResult  # pydantic v2
+    return ValidationResult(
+        is_valid=(status == "valid"),
+        errors=errors or [],
+        suggestions=suggestions or []
+    )
