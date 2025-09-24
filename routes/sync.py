@@ -1,79 +1,87 @@
-# routes/sync.py
-import asyncio
-import logging
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.responses import JSONResponse
+from sqlalchemy import select
 
+import models
 from database import get_db
 from services import sync_service
-from schemas import SyncPayload # Asigură-te că acest import este corect
 
 router = APIRouter(
     prefix="/sync",
-    tags=["Sync"],
+    tags=["Sync"]
 )
 
-# O variabilă simplă pentru a preveni rularea a două sincronizări simultan
-sync_in_progress = False
+class SyncPayload(BaseModel):
+    days: int = 30
 
-@router.post("/orders")
-# --- MODIFICARE AICI ---
-# Funcția va primi acum un `payload` la fel ca `trigger_full_sync`
-async def trigger_orders_sync(payload: SyncPayload, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
-    """ Pornește o sincronizare doar pentru comenzi, în fundal. """
-    global sync_in_progress
-    if sync_in_progress:
-        raise HTTPException(status_code=409, detail="O altă sincronizare este deja în curs.")
-    
-    async def run_sync():
-        global sync_in_progress
-        sync_in_progress = True
-        try:
-            # --- MODIFICARE AICI ---
-            # Folosim `payload.days` în loc de valoarea fixă 30
-            await sync_service.run_orders_sync(db, days=payload.days)
-        finally:
-            sync_in_progress = False
-            
-    background_tasks.add_task(run_sync)
-    return JSONResponse(status_code=202, content={"message": "Sincronizarea comenzilor a început."})
+class FullSyncPayload(BaseModel):
+    store_ids: list[int]
+    days: int = 30
 
-@router.post("/couriers")
-async def trigger_couriers_sync(background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
-    """ Pornește o sincronizare doar pentru curieri, în fundal. """
-    global sync_in_progress
-    if sync_in_progress:
-        raise HTTPException(status_code=409, detail="O altă sincronizare este deja în curs.")
+@router.post("/orders", status_code=202)
+async def run_orders_sync_route(
+    payload: SyncPayload,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Rulează o sincronizare standard de comenzi pentru TOATE magazinele active.
+    """
+    stmt = select(models.Store).where(models.Store.is_active == True)
+    active_stores = (await db.execute(stmt)).scalars().all()
 
-    async def run_sync():
-        global sync_in_progress
-        sync_in_progress = True
-        try:
-            await sync_service.run_couriers_sync(db)
-        finally:
-            sync_in_progress = False
+    if not active_stores:
+        raise HTTPException(status_code=404, detail="Niciun magazin activ nu a fost găsit pentru sincronizare.")
 
-    background_tasks.add_task(run_sync)
-    return JSONResponse(status_code=202, content={"message": "Sincronizarea curierilor a început."})
+    background_tasks.add_task(
+        sync_service.run_orders_sync, 
+        db=db, 
+        stores_to_sync=active_stores, 
+        days=payload.days, 
+        full_sync=False
+    )
+    return {"message": "Sincronizarea comenzilor a început în fundal pentru magazinele active."}
 
-@router.post("/full")
-async def trigger_full_sync(payload: SyncPayload, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
-    """ Pornește o sincronizare completă (comenzi + curieri) în fundal. """
-    global sync_in_progress
-    if sync_in_progress:
-        raise HTTPException(status_code=409, detail="O altă sincronizare este deja în curs.")
+@router.post("/couriers", status_code=202)
+async def run_couriers_sync_route(
+    background_tasks: BackgroundTasks, 
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Rulează o sincronizare a statusurilor de la curieri.
+    """
+    background_tasks.add_task(sync_service.run_couriers_sync, db=db, full_sync=True)
+    return {"message": "Sincronizarea statusurilor de la curieri a început în fundal."}
 
-    async def run_sync():
-        global sync_in_progress
-        sync_in_progress = True
-        try:
-            logging.warning(f"Sincronizare completă pornită pentru magazinele: {payload.store_ids} pe o perioada de {payload.days} zile")
-            # --- MODIFICARE AICI ---
-            # Folosim `payload.days` în loc de valoarea fixă 30
-            await sync_service.run_full_sync(db, days=payload.days)
-        finally:
-            sync_in_progress = False
 
-    background_tasks.add_task(run_sync)
-    return JSONResponse(status_code=202, content={"message": "Sincronizarea completă a început."})
+@router.post("/full", status_code=202)
+async def run_full_sync_route(
+    payload: FullSyncPayload,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Rulează o sincronizare completă pentru magazinele selectate.
+    """
+    if not payload.store_ids:
+        raise HTTPException(status_code=400, detail="Te rog selectează cel puțin un magazin.")
+
+    background_tasks.add_task(
+        sync_service.run_full_sync,
+        db=db,
+        store_ids=payload.store_ids,
+        days=payload.days
+    )
+    return {"message": f"Sincronizarea completă a început pentru {len(payload.store_ids)} magazine."}
+
+@router.post("/validate-addresses", status_code=202)
+async def trigger_address_validation(
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Pornește un task în fundal pentru a valida adresele tuturor comenzilor.
+    """
+    background_tasks.add_task(sync_service.run_address_validation_for_all_orders, db)
+    return {"message": "Validarea adreselor a început în fundal."}
