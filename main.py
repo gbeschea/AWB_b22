@@ -4,8 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from routes import (
-    store_categories, printing, logs, orders, sync, labels,
+    store_categories, printing, logs, orders, sync, labels, actions,
     settings as settings_router, validation, webhooks, couriers, background, processing
+    
 )
 from websocket_manager import manager
 from settings import settings
@@ -53,6 +54,7 @@ app.include_router(printing.router, tags=["Printing"])
 app.include_router(logs.router, tags=["Logs"])
 app.include_router(store_categories.router, tags=["Store Categories"])
 app.include_router(background.router, tags=["Background Tasks"])
+app.include_router(actions.router)
 
 @app.on_event("startup")
 async def on_startup():
