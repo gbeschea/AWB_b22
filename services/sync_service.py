@@ -18,6 +18,15 @@ from services import shopify_service, address_service
 from services.courier_service import track_and_update_shipments as track_couriers
 from websocket_manager import manager
 from database import AsyncSessionLocal
+from services.utils import calculate_and_set_derived_status
+from schemas import ValidationResult
+from services import courier_service
+import logging
+logger = logging.getLogger(__name__)
+from models import Order, Store, Shipment
+
+
+
 
 
 def _dt(v: Optional[str]) -> Optional[datetime]:
@@ -254,3 +263,33 @@ async def run_couriers_sync(db: AsyncSession, full_sync: bool = False):
 async def run_full_sync(db: AsyncSession, days: int):
     await run_orders_sync(db, days, full_sync=True)
     await run_couriers_sync(db, full_sync=True)
+
+# === AICI ESTE MODIFICAREA ===
+async def run_address_validation_for_all_orders(db: AsyncSession):
+    """
+    Rulează validarea adreselor pentru TOATE comenzile din baza de date,
+    cu salvare periodică a progresului.
+    """
+    logger.info("Începe validarea adreselor pentru toate comenzile...")
+    
+    stmt = select(Order)
+    result = await db.execute(stmt)
+    all_orders = result.scalars().all()
+    
+    total = len(all_orders)
+    logger.info(f"S-au găsit {total} comenzi pentru validare.")
+    
+    for i, order in enumerate(all_orders):
+        try:
+            await address_service.validate_address_for_order(db, order)
+        except Exception as e:
+            logger.error(f"Eroare la validarea comenzii {order.name}: {e}")
+
+        # La fiecare 100 de comenzi, salvăm în baza de date și afișăm progresul
+        if (i + 1) % 100 == 0:
+            await db.commit()
+            logger.info(f"  -> Validat și salvat {i + 1}/{total}...")
+
+    # Asigură-te că se salvează și restul de comenzi la final
+    await db.commit()
+    logger.info(f"VALIDAREA ADRESELOR a fost finalizată pentru {total} comenzi.")
