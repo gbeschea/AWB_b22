@@ -1,10 +1,10 @@
 {% extends "_layout.html" %}
 
-{% block title %}{{ page_title }} - AWB Hub{% endblock %}
+{% block title %}Procesare Comenzi - AWB Hub{% endblock %}
 
 {% block content %}
 <div class="container">
-    <h1 class="title">{{ page_title }}</h1>
+    <h1 class="title">Procesare Comenzi</h1>
     <p class="subtitle">
         Comenzi cu adresa validată, gata pentru generare AWB.
         Găsite: <strong>{{ total_orders }}</strong> comenzi.
@@ -15,38 +15,52 @@
         <table class="table is-bordered is-striped is-narrow is-hoverable is-fullwidth">
             <thead>
                 <tr>
-                    <th><input type="checkbox" id="master-checkbox"></th>
                     <th>Comandă</th>
                     <th>Dată</th>
-                    <th>Client / Telefon</th>
+                    <th>Client</th>
                     <th>Adresă</th>
                     <th>Produse</th>
+                    <th style="width: 220px;">Acțiuni AWB</th>
                 </tr>
             </thead>
             <tbody>
                 {% for order in orders %}
-                <tr>
-                    <td><input type="checkbox" class="order-checkbox" data-order-id="{{ order.id }}"></td>
+                <tr id="order-row-{{ order.id }}">
                     <td>
                         <a href="https://{{ order.store.domain }}/admin/orders/{{ order.shopify_order_id.split('/')[-1] }}" target="_blank" title="Vezi în Shopify">
                             {{ order.name }}
                         </a><br>
                         <small>{{ order.store.name }}</small>
                     </td>
-                    <td>{{ order.created_at | localtime | strftime('%d-%m-%Y %H:%M') }}</td>
+                    <td>{{ order.created_at | localtime | strftime('%d-%m-%Y') }}</td>
                     <td>{{ order.customer }}<br><small>{{ order.shipping_phone }}</small></td>
                     <td>
                         {{ order.shipping_address1 }}<br>
-                        {% if order.shipping_address2 %}{{ order.shipping_address2 }}<br>{% endif %}
                         {{ order.shipping_city }}, {{ order.shipping_zip }}
                     </td>
                     <td>
-                        <div class="content is-small">
+                        <small>
                             <ul>
                                 {% for item in order.line_items %}
-                                <li>{{ item.quantity }}x {{ item.title }} ({{ item.sku }})</li>
+                                <li>{{ item.quantity }}x {{ item.title }}</li>
                                 {% endfor %}
                             </ul>
+                        </small>
+                    </td>
+                    <td>
+                        <div class="action-cell" data-order-id="{{ order.id }}">
+                            <div class="field">
+                                <div class="control">
+                                    <div class="select is-small is-fullwidth">
+                                        <select class="courier-select">
+                                            <option value="">Alege Curier</option>
+                                            <option value="dpd-ro">DPD Romania</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <button class="button is-small is-primary is-fullwidth generate-awb-btn" disabled style="margin-top: 5px;">Generează AWB</button>
+                            <p class="awb-result is-size-7 has-text-grey mt-1"></p>
                         </div>
                     </td>
                 </tr>
@@ -59,7 +73,7 @@
     
     {% else %}
     <div class="notification is-info mt-4">
-        Nicio comandă gata de procesare nu a fost găsită. Rulează o sincronizare pentru a aduce comenzi noi.
+        Nicio comandă gata de procesare nu a fost găsită.
     </div>
     {% endif %}
 </div>
@@ -67,6 +81,59 @@
 
 {% block scripts %}
 <script>
-// Aici vom adăuga logica pentru butoanele de generare AWB-uri.
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('.action-cell').forEach(cell => {
+        const orderId = cell.dataset.orderId;
+        const select = cell.querySelector('.courier-select');
+        const button = cell.querySelector('.generate-awb-btn');
+        const resultP = cell.querySelector('.awb-result');
+
+        select.addEventListener('change', () => {
+            button.disabled = !select.value;
+        });
+
+        button.addEventListener('click', () => {
+            const courierAccountKey = select.value;
+            if (!courierAccountKey) return;
+
+            button.textContent = 'Se generează...';
+            button.disabled = true;
+            resultP.textContent = '';
+            resultP.className = 'awb-result is-size-7 has-text-grey mt-1';
+
+            fetch('/actions/create-awb', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify({
+                    order_id: parseInt(orderId, 10),
+                    courier_account_key: courierAccountKey
+                })
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(err => Promise.reject(err));
+                }
+                return response.json();
+            })
+            .then(data => {
+                resultP.innerHTML = `AWB: <strong>${data.awb}</strong>`;
+                resultP.classList.remove('has-text-danger');
+                resultP.classList.add('has-text-success');
+                button.textContent = 'Generat ✔';
+                select.disabled = true;
+            })
+            .catch(error => {
+                resultP.textContent = `Eroare: ${error.detail || 'Necunoscută'}`;
+                resultP.classList.remove('has-text-success');
+                resultP.classList.add('has-text-danger');
+                button.textContent = 'Reîncearcă';
+                button.disabled = false;
+            });
+        });
+    });
+});
 </script>
 {% endblock %}
