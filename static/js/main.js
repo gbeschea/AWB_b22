@@ -1,5 +1,26 @@
 document.addEventListener('DOMContentLoaded', function () {
-    
+
+        // === MODIFICAREA CHEIE ESTE AICI: Am adăugat funcțiile ajutătoare ===
+    const syncProgressBar = document.getElementById('syncProgressBar');
+    const syncProgressText = document.getElementById('syncProgressText');
+
+    function showSyncProgress(message, isError = false) {
+        if (syncProgressBar && syncProgressText) {
+            syncProgressText.textContent = message;
+            syncProgressText.style.color = isError ? '#d32f2f' : 'inherit'; // Roșu pentru eroare
+            syncProgressBar.style.display = 'block';
+        }
+    }
+
+    function hideSyncProgress() {
+        if (syncProgressBar) {
+            syncProgressBar.style.display = 'none';
+        }
+    }
+    // === FINAL MODIFICARE ===
+
+
+
     // --- 1. BUTONUL GLOBAL PENTRU VEDERE DETALIATĂ / COMPACTĂ ---
     const globalToggleButton = document.getElementById('toggle-detailed-view');
     if (globalToggleButton) {
@@ -286,4 +307,33 @@ document.addEventListener('DOMContentLoaded', function () {
             document.getElementById('goToPageForm').submit();
         });
     }
+
+
+
+
+    
+    const validateAddressesButton = document.getElementById('validateAddressesButton');
+    if (validateAddressesButton) {
+        validateAddressesButton.addEventListener('click', () => {
+            showSyncProgress('Inițiază validarea tuturor adreselor...');
+            fetch('/sync/validate-addresses', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                showSyncProgress(data.message || 'Proces început.');
+                // Ascundem bara de progres după 5 secunde
+                setTimeout(() => {
+                    hideSyncProgress();
+                }, 5000);
+            })
+            .catch(error => {
+                console.error('Eroare la validarea adreselor:', error);
+                showSyncProgress('Eroare la pornirea procesului.', true);
+            });
+        });
+    }
+
+    
 });
+

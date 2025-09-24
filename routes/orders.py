@@ -12,6 +12,11 @@ from database import get_db
 from services import filter_service
 from dependencies import get_templates
 from settings import settings
+import json
+import os
+import math
+from templating import templates
+import base64
 
 router = APIRouter()
 
@@ -35,7 +40,15 @@ def _enhance_orders_for_view(orders: List):
     return orders
 
 @router.get("/view", response_class=HTMLResponse, name="view_orders")
-async def view_orders_page(request: Request, db: AsyncSession = Depends(get_db), templates: Jinja2Templates = Depends(get_templates)):
+async def view_orders_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    page: int = 1,
+    per_page: int = 100,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+    filters: str = None
+):
     query_params = request.query_params
 
     orders, total_orders, filter_counts = await filter_service.get_filtered_orders(db, query_params)
@@ -64,6 +77,38 @@ async def view_orders_page(request: Request, db: AsyncSession = Depends(get_db),
             courier_status_group_options.append((group_key, display_name))
 
     orders = _enhance_orders_for_view(orders)
+           # === ÎNCEPUT MODIFICARE (înlocuiește complet codul anterior) ===
+    with open("config/courier_map.json", "r") as f:
+        courier_map = json.load(f)
+
+    courier_tracking_map = {}
+    for courier_name, courier_slug in courier_map.items():
+        # Extragem numele de bază al curierului (ex: 'dpd' din 'dpd-ro')
+        config_file_name = courier_slug.split('-')[0]
+        config_path = f"config/{config_file_name}.json"
+
+        # Verificăm dacă fișierul de configurare există
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                courier_config = json.load(f)
+                tracking_url = courier_config.get("tracking_url")
+                if tracking_url:
+                    courier_tracking_map[courier_name] = tracking_url
+    # === SFÂRȘIT MODIFICARE ===
+        # === ÎNCEPUT MODIFICARE (Adaugă acest bloc) ===
+    decoded_filters = {}
+    if filters:
+        try:
+            # Decodează din Base64 și apoi din JSON
+            decoded_filters = json.loads(base64.urlsafe_b64decode(filters))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # În caz de eroare, resetează la un dicționar gol
+            decoded_filters = {}
+    # === SFÂRȘIT MODIFICARE ===
+
+    total_pages = math.ceil(total_orders / per_page)
+
+
 
     context = {
         "request": request,
@@ -79,5 +124,14 @@ async def view_orders_page(request: Request, db: AsyncSession = Depends(get_db),
         "address_status_options": address_status_options,
         "courier_status_group_options": courier_status_group_options,
         "filter_counts": filter_counts,
+        "courier_tracking_map": courier_tracking_map,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "sort_by": sort_by,
+        "sort_order": sort_order,
+        "filters": decoded_filters,
+        "route_name": "view_orders"
+
     }
     return templates.TemplateResponse("index.html", context)

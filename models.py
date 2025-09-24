@@ -89,6 +89,8 @@ class Order(Base):
   line_items = relationship('LineItem', back_populates='order', cascade='all, delete-orphan')
   shipments = relationship('Shipment', back_populates='order', cascade='all, delete-orphan')
   fulfillment_orders = relationship('FulfillmentOrder', back_populates='order', cascade='all, delete-orphan')
+  address_validations = relationship("AddressValidation", back_populates="order", cascade="all, delete-orphan")
+
 
 class Shipment(Base):
   __tablename__ = 'shipments'
@@ -172,3 +174,16 @@ class CourierMapping(Base):
     shopify_name = Column(String(255), unique=True, nullable=False, index=True)
     account_key = Column(String(64), ForeignKey('courier_accounts.account_key'), nullable=False)
     account = relationship("CourierAccount", back_populates="mappings")
+
+class AddressValidation(Base):
+    __tablename__ = 'address_validations'
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey('orders.id'), nullable=False, index=True)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    validator_version = Column(String(32))
+    status = Column(String(64), index=True)
+    score = Column(Integer)
+    errors = Column(JSONB)
+    suggestions = Column(JSONB)
+    
+    order = relationship("Order", back_populates="address_validations")
