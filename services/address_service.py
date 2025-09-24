@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 Address validator — v8.3 (AWB Hub)
@@ -29,6 +28,9 @@ from difflib import SequenceMatcher
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from schemas import ValidationResult
+
+
 
 __VALIDATOR_VERSION__ = "v8.3.1"
 
@@ -554,10 +556,11 @@ async def validate_address_for_order(db: AsyncSession, order: Any) -> Validation
 
     _set_order_fields(order, status, score, errors, suggestions)
 
-    # opțional: și un return programatic (util în teste/CLI)
-    from schemas import ValidationResult  # pydantic v2
+    # === MODIFICAREA FINALĂ ESTE AICI ===
+    # Am adăugat 'score=score'
     return ValidationResult(
         is_valid=(status == "valid"),
+        score=score,
         errors=errors or [],
         suggestions=suggestions or []
     )

@@ -10,6 +10,7 @@ from routes import (
 from websocket_manager import manager
 from settings import settings
 from database import engine
+import logging
 
 # Optional: close shared HTTP client used by courier services
 try:
@@ -22,6 +23,10 @@ app = FastAPI(
     description="Aplicatie pentru managementul comenzilor și generarea de AWB-uri.",
     version="1.0.0"
 )
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 # CORS
 app.add_middleware(
