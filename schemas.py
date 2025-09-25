@@ -1,8 +1,8 @@
 # schemas.py
 
 from pydantic import BaseModel, ConfigDict, Field
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, date
+from typing import List, Optional, Literal  # <-- AICI ESTE CORECȚIA: Am adăugat Literal
 
 # =================================================================
 # NOU: Schema pentru rezultatul validării adresei
@@ -84,7 +84,23 @@ class Order(OrderBase):
 
 class SyncPayload(BaseModel):
     store_ids: list[int]
-    # --- MODIFICARE AICI ---
-    # Am adăugat câmpul `days` pentru a primi perioada de la frontend.
-    # Valoarea implicită este 30, pentru a nu strica apelurile vechi.
     days: int = 30
+
+# === SCHEME NOI PENTRU INTERFAȚA DE CREARE AWB ===
+
+class DpdServiceOption(BaseModel):
+    id: int
+    name: str
+
+class AwbCreateOptions(BaseModel):
+    service_id: Optional[int] = None
+    parcels_count: int = 1
+    total_weight: float = 1.0
+    cod_amount: Optional[float] = None
+    payer: Literal['SENDER', 'RECIPIENT'] = 'SENDER'
+    pickup_date: Optional[date] = None
+
+class AwbCreateParams(BaseModel):
+    order_id: int
+    courier_account_key: str
+    options: AwbCreateOptions

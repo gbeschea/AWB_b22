@@ -1,139 +1,213 @@
 {% extends "_layout.html" %}
 
-{% block title %}Procesare Comenzi - AWB Hub{% endblock %}
+{% block title %}{{ page_title or 'Procesare' }} - AWB Hub{% endblock %}
 
 {% block content %}
 <div class="container">
-    <h1 class="title">Procesare Comenzi</h1>
-    <p class="subtitle">
-        Comenzi cu adresa validată, gata pentru generare AWB.
-        Găsite: <strong>{{ total_orders }}</strong> comenzi.
-    </p>
+  <h1 class="title">{{ page_title or 'Procesare comenzi' }}</h1>
+  <p class="subtitle">
+    Comenzi eligibile pentru generare AWB. Total: <strong>{{ total_orders or (orders|length if orders is defined else 0) }}</strong>
+  </p>
 
-    {% if orders %}
-    <div class="table-container">
-        <table class="table is-bordered is-striped is-narrow is-hoverable is-fullwidth">
-            <thead>
-                <tr>
-                    <th>Comandă</th>
-                    <th>Dată</th>
-                    <th>Client</th>
-                    <th>Adresă</th>
-                    <th>Produse</th>
-                    <th style="width: 220px;">Acțiuni AWB</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for order in orders %}
-                <tr id="order-row-{{ order.id }}">
-                    <td>
-                        <a href="https://{{ order.store.domain }}/admin/orders/{{ order.shopify_order_id.split('/')[-1] }}" target="_blank" title="Vezi în Shopify">
-                            {{ order.name }}
-                        </a><br>
-                        <small>{{ order.store.name }}</small>
-                    </td>
-                    <td>{{ order.created_at | localtime | strftime('%d-%m-%Y') }}</td>
-                    <td>{{ order.customer }}<br><small>{{ order.shipping_phone }}</small></td>
-                    <td>
-                        {{ order.shipping_address1 }}<br>
-                        {{ order.shipping_city }}, {{ order.shipping_zip }}
-                    </td>
-                    <td>
-                        <small>
-                            <ul>
-                                {% for item in order.line_items %}
-                                <li>{{ item.quantity }}x {{ item.title }}</li>
-                                {% endfor %}
-                            </ul>
-                        </small>
-                    </td>
-                    <td>
-                        <div class="action-cell" data-order-id="{{ order.id }}">
-                            <div class="field">
-                                <div class="control">
-                                    <div class="select is-small is-fullwidth">
-                                        <select class="courier-select">
-                                            <option value="">Alege Curier</option>
-                                            <option value="dpd-ro">DPD Romania</option>
-                                        </select>
-                                    </div>
-                                </div>
-                            </div>
-                            <button class="button is-small is-primary is-fullwidth generate-awb-btn" disabled style="margin-top: 5px;">Generează AWB</button>
-                            <p class="awb-result is-size-7 has-text-grey mt-1"></p>
-                        </div>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+  <div class="box is-shadowless" style="display:flex;gap:1rem;align-items:flex-end;flex-wrap:wrap;">
+    <div>
+      <label class="label">Profil global</label>
+      <div class="select">
+        <select id="globalProfileSelect">
+          <option value="">— (fără profil) —</option>
+        </select>
+      </div>
     </div>
+    <div>
+      <label class="label">&nbsp;</label>
+      <button class="button is-light" id="saveGlobalProfileBtn" title="Salvează setările curente ale formularului ca profil">Salvează profil</button>
+    </div>
+    <div>
+      <label class="label">&nbsp;</label>
+      <button class="button" id="applyProfileToAllBtn" title="Aplică profilul selectat pe toate rândurile">Aplică profilul la toate</button>
+    </div>
+    <div style="margin-left:auto;">
+      <label class="label">&nbsp;</label>
+      <button class="button is-info" id="bulkCreateAwbBtn">Generează AWB (selectate)</button>
+    </div>
+  </div>
 
-    {% include '_pagination.html' %}
-    
-    {% else %}
-    <div class="notification is-info mt-4">
-        Nicio comandă gata de procesare nu a fost găsită.
-    </div>
-    {% endif %}
+  {% if orders %}
+  <div class="table-container">
+    <table class="table is-bordered is-narrow is-hoverable is-fullwidth">
+      <thead>
+        <tr>
+          <th><input id="rowSelectAll" type="checkbox"></th>
+          <th>#</th>
+          <th>Comandă</th>
+          <th>Client</th>
+          <th>Adresă</th>
+          <th>Total</th>
+          <th>Plată</th>
+          <th style="min-width:260px;">Profil & Acțiuni</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for order in orders %}
+        {% set payment = (order.mapped_payment or '')|lower %}
+        {% set is_cod = ('ramburs' in payment) or ('cod' in payment) %}
+        {% set shipping_val = (order.shipping_total if order.shipping_total is not none else (order.shipping_price if order.shipping_price is not none else 0)) %}
+        <tr data-order-id="{{ order.id }}">
+          <td><input type="checkbox" class="row-checkbox"></td>
+          <td>{{ loop.index }}</td>
+          <td>
+            <div><strong>{{ order.name }}</strong></div>
+            <div><small>{{ order.store.name if order.store else '' }}</small></div>
+          </td>
+          <td>
+            <div>{{ order.customer or order.shipping_name }}</div>
+            <div><small>{{ order.shipping_phone }}</small></div>
+          </td>
+          <td>
+            <div>{{ order.shipping_address1 }}</div>
+            {% if order.shipping_address2 %}<div>{{ order.shipping_address2 }}</div>{% endif %}
+            <div>{{ order.shipping_city }} {{ order.shipping_zip }}</div>
+          </td>
+          <td>{{ '%.2f'|format(order.total_price or 0) }} RON</td>
+          <td>{{ 'Ramburs' if is_cod else 'Plată online' }}</td>
+          <td>
+            <div style="display:flex;gap:.5rem;align-items:center;">
+              <div class="select is-small">
+                <select class="row-profile-select" data-default>
+                  <option value="">— (fără profil) —</option>
+                </select>
+              </div>
+              <button type="button"
+                      class="button is-small is-success quick-create-awb-btn"
+                      data-order-id="{{ order.id }}"
+                      data-order-name="{{ order.name }}"
+                      data-courier-key="dpd-ro"
+                      data-total="{{ '%.2f'|format(order.total_price or 0) }}"
+                      data-shipping="{{ '%.2f'|format(shipping_val or 0) }}"
+                      data-paid="{{ 'false' if is_cod else 'true' }}">
+                Creează AWB
+              </button>
+              <button type="button"
+                      class="button is-small"
+                      title="Setări avansate"
+                      data-advanced
+                      data-order-id="{{ order.id }}"
+                      data-order-name="{{ order.name }}"
+                      data-courier-key="dpd-ro"
+                      data-total="{{ '%.2f'|format(order.total_price or 0) }}"
+                      data-shipping="{{ '%.2f'|format(shipping_val or 0) }}"
+                      data-paid="{{ 'false' if is_cod else 'true' }}">•••</button>
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <div class="notification is-info">Nu există comenzi pregătite pentru AWB.</div>
+  {% endif %}
 </div>
+
+<!-- Dialogul avansat rămâne disponibil -->
+<dialog id="createAwbModal">
+  <article style="min-width: 760px; max-width: 96vw;">
+    <header class="is-flex is-justify-content-space-between is-align-items-center">
+      <strong>Creează AWB</strong>
+      <a href="#" aria-label="Închide" class="delete" data-close-modal></a>
+    </header>
+
+    <form id="createAwbForm">
+      <input type="hidden" id="awbOrderId">
+      <input type="hidden" id="awbCourierKey">
+
+      <div class="field is-grouped" style="margin-bottom:1rem;">
+        <div class="control">
+          <label class="label">Profil</label>
+          <div class="select">
+            <select id="awbProfileSelect">
+              <option value="">— (fără profil) —</option>
+            </select>
+          </div>
+        </div>
+        <div class="control" style="align-self:flex-end;">
+          <button type="button" id="saveAwbProfileBtn" class="button is-light">Salvează profil</button>
+        </div>
+      </div>
+
+      <div class="columns">
+        <div class="column">
+          <label class="label" for="awbServiceId">Serviciu</label>
+          <div class="select is-fullwidth">
+            <select id="awbServiceId" required>
+              <option value="">Se încarcă...</option>
+            </select>
+          </div>
+        </div>
+        <div class="column">
+          <label class="label" for="awbParcelsCount">Colete</label>
+          <input id="awbParcelsCount" class="input" type="number" min="1" value="1">
+        </div>
+        <div class="column">
+          <label class="label" for="awbTotalWeight">Greutate totală (kg)</label>
+          <input id="awbTotalWeight" class="input" type="number" min="0" step="0.1" value="1.0">
+        </div>
+      </div>
+
+      <details style="margin-bottom:1rem;">
+        <summary>Dimensiuni opționale</summary>
+        <div class="columns" style="margin-top:.5rem;">
+          <div class="column">
+            <label class="label" for="awbLength">Lungime (cm)</label>
+            <input id="awbLength" class="input" type="number" min="0">
+          </div>
+          <div class="column">
+            <label class="label" for="awbWidth">Lățime (cm)</label>
+            <input id="awbWidth" class="input" type="number" min="0">
+          </div>
+          <div class="column">
+            <label class="label" for="awbHeight">Înălțime (cm)</label>
+            <input id="awbHeight" class="input" type="number" min="0">
+          </div>
+        </div>
+      </details>
+
+      <div class="columns">
+        <div class="column">
+          <label class="label" for="awbCodAmount">Suma ramburs (RON)</label>
+          <input id="awbCodAmount" class="input" type="number" min="0" step="0.01" placeholder="Comandă fără ramburs">
+          <p class="help" id="awbCodAutoNote"></p>
+        </div>
+        <div class="column">
+          <label class="label" for="awbPayer">Plătitor transport</label>
+          <div class="select is-fullwidth">
+            <select id="awbPayer">
+              <option value="SENDER">Expeditor</option>
+              <option value="RECIPIENT">Destinatar</option>
+            </select>
+          </div>
+        </div>
+        <div class="column">
+          <label class="label" for="awbPickupDate">Data ridicare</label>
+          <input id="awbPickupDate" class="input" type="date">
+          <p class="help" id="awbPickupNote">Dacă lași gol, alegem automat prima zi de ridicare disponibilă.</p>
+        </div>
+      </div>
+
+      <label class="checkbox" style="display:flex;gap:.5rem;align-items:center;margin:.5rem 0 1rem;">
+        <input id="awbIncludeShipInCod" type="checkbox" checked>
+        Include taxa de transport în ramburs (COD)
+      </label>
+
+      <footer class="is-flex is-justify-content-flex-end" style="gap:.5rem;">
+        <button type="button" class="button" data-close-modal>Anulează</button>
+        <button id="submitAwbButton" type="submit" class="button is-info is-fullwidth">Generează</button>
+      </footer>
+    </form>
+  </article>
+</dialog>
 {% endblock %}
 
 {% block scripts %}
-<script>
-document.addEventListener('DOMContentLoaded', function () {
-    document.querySelectorAll('.action-cell').forEach(cell => {
-        const orderId = cell.dataset.orderId;
-        const select = cell.querySelector('.courier-select');
-        const button = cell.querySelector('.generate-awb-btn');
-        const resultP = cell.querySelector('.awb-result');
-
-        select.addEventListener('change', () => {
-            button.disabled = !select.value;
-        });
-
-        button.addEventListener('click', () => {
-            const courierAccountKey = select.value;
-            if (!courierAccountKey) return;
-
-            button.textContent = 'Se generează...';
-            button.disabled = true;
-            resultP.textContent = '';
-            resultP.className = 'awb-result is-size-7 has-text-grey mt-1';
-
-            fetch('/actions/create-awb', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
-                body: JSON.stringify({
-                    order_id: parseInt(orderId, 10),
-                    courier_account_key: courierAccountKey
-                })
-            })
-            .then(response => {
-                if (!response.ok) {
-                    return response.json().then(err => Promise.reject(err));
-                }
-                return response.json();
-            })
-            .then(data => {
-                resultP.innerHTML = `AWB: <strong>${data.awb}</strong>`;
-                resultP.classList.remove('has-text-danger');
-                resultP.classList.add('has-text-success');
-                button.textContent = 'Generat ✔';
-                select.disabled = true;
-            })
-            .catch(error => {
-                resultP.textContent = `Eroare: ${error.detail || 'Necunoscută'}`;
-                resultP.classList.remove('has-text-success');
-                resultP.classList.add('has-text-danger');
-                button.textContent = 'Reîncearcă';
-                button.disabled = false;
-            });
-        });
-    });
-});
-</script>
+  <script src="{{ url_for('static', path='js/main.js') }}" defer></script>
 {% endblock %}
