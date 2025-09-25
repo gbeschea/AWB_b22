@@ -1,116 +1,113 @@
-# /routes/labels.py
+# routes/labels.py
 
-import os
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Form
+from fastapi.responses import Response, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
-from typing import List
+from PyPDF2 import PdfMerger
+import io
+import logging
 from datetime import datetime
-import pytz
 
 from database import get_db
 import models
-from services import label_service # Managerul principal pentru etichete
+from services.couriers import get_courier_service, common as courier_common
 
-router = APIRouter()
+router = APIRouter(
+    prefix="/labels",
+    tags=["Labels"]
+)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Creăm directorul pentru arhivă dacă nu există
-ARCHIVE_DIR = "arhiva_printuri"
-os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
-@router.get("/labels/download/{awb}")
-async def download_single_label(awb: str, db: AsyncSession = Depends(get_db)):
-    """
-    Descarcă o singură etichetă direct de la curier, la cerere.
-    """
-    # Pas 1: Găsim detaliile livrării în baza de date
-    stmt = select(models.Shipment).where(models.Shipment.awb == awb)
-    result = await db.execute(stmt)
-    shipment = result.scalars().first()
-
-    if not shipment:
-        raise HTTPException(status_code=404, detail=f"AWB-ul {awb} nu a fost găsit în baza de date.")
-
-    # Pas 2: Folosim `label_service` pentru a descărca PDF-ul de la curier
-    # `generate_labels_pdf` funcționează și pentru o singură livrare
-    awb_to_pdf_map, failed_awbs_map = await label_service.generate_labels_pdf(db, [shipment])
-
-    # Pas 3: Verificăm dacă descărcarea a reușit
-    if awb not in awb_to_pdf_map:
-        error_message = failed_awbs_map.get(awb, "Eroare necunoscută la descărcare.")
-        raise HTTPException(status_code=500, detail=f"Nu s-a putut descărca eticheta: {error_message}")
-
-    pdf_content = awb_to_pdf_map[awb]
-
-    # Pas 4: Returnăm PDF-ul către utilizator
-    return Response(
-        content=pdf_content,
-        media_type='application/pdf',
-        headers={'Content-Disposition': f'inline; filename="AWB_{awb}.pdf"'}
+@router.get("/download/{awb}", response_class=Response, name="download_single_label")
+async def download_label(awb: str, db: AsyncSession = Depends(get_db)):
+    stmt = (
+        select(models.Shipment)
+        .options(selectinload(models.Shipment.order).selectinload(models.Order.store))
+        .where(models.Shipment.awb == awb)
     )
+    shipment = (await db.execute(stmt)).scalar_one_or_none()
+    if not shipment:
+        raise HTTPException(status_code=404, detail="AWB-ul nu a fost găsit.")
+    try:
+        courier_service = get_courier_service(shipment.courier)
+        account = await courier_common.get_courier_account_by_key(db, shipment.account_key)
+        if not account or not account.credentials:
+             raise HTTPException(status_code=404, detail=f"Credentialele pentru contul {shipment.account_key} nu au fost gasite.")
 
+        pdf_content = await courier_service.get_label(
+            awb=shipment.awb,
+            creds=account.credentials,
+            paper_size=shipment.paper_size
+        )
+        if not pdf_content:
+            raise HTTPException(status_code=404, detail="Eticheta nu a putut fi generată de la curier.")
 
-@router.post("/labels/merge_for_print")
-async def merge_labels_for_printing(request: Request, awbs: str = Form(...), db: AsyncSession = Depends(get_db)):
-    """
-    Primește o listă de AWB-uri, descarcă etichetele și le combină într-un PDF.
-    (Această funcție este acum corectă).
-    """
-    if not awbs:
-        raise HTTPException(status_code=400, detail="Niciun AWB selectat.")
+        # === MODIFICARE: Marcăm AWB-ul ca fiind printat ===
+        if shipment.printed_at is None:
+            shipment.printed_at = datetime.utcnow()
+            await db.commit()
+        # ===================================================
 
+        return Response(content=pdf_content, media_type="application/pdf")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Nu s-a putut descărca eticheta: {e}")
+
+@router.post("/merge_for_print")
+async def merge_labels_for_print(awbs: str = Form(...), db: AsyncSession = Depends(get_db)):
     awb_list = [awb.strip() for awb in awbs.split(',') if awb.strip()]
     if not awb_list:
-        raise HTTPException(status_code=400, detail="Lista de AWB-uri este goală.")
+        return JSONResponse(status_code=400, content={"detail": "Niciun AWB valid furnizat."})
 
-    stmt = select(models.Shipment).options(
-        selectinload(models.Shipment.order)
-    ).where(models.Shipment.awb.in_(awb_list))
+    stmt = select(models.Shipment).where(models.Shipment.awb.in_(awb_list))
+    shipments = (await db.execute(stmt)).scalars().all()
     
-    result = await db.execute(stmt)
-    shipments_data = result.scalars().unique().all()
+    shipment_map = {s.awb: s for s in shipments}
+    merger = PdfMerger()
+    successful_awbs = []
+    failed_awbs = list(set(awb_list) - set(shipment_map.keys()))
 
-    if not shipments_data:
-        raise HTTPException(status_code=404, detail="Niciunul dintre AWB-urile selectate nu a fost găsit.")
-
-    awb_to_pdf_map, failed_awbs_map = await label_service.generate_labels_pdf(db, shipments_data)
-
-    if not awb_to_pdf_map:
-        error_details = "; ".join([f"{awb}: {reason}" for awb, reason in failed_awbs_map.items()])
-        raise HTTPException(status_code=500, detail=f"Nu s-a putut genera nicio etichetă. Detalii: {error_details}")
-
-    combined_pdf_bytes = label_service.merge_labels(awb_to_pdf_map)
-    
-    # Salvarea locală și logarea (rămân la fel)
-    bucharest_tz = pytz.timezone("Europe/Bucharest")
-    now = datetime.now(bucharest_tz)
-    filename = f"Print_{now.strftime('%Y-%m-%d_%H-%M-%S')}.pdf"
-    file_path = os.path.join(ARCHIVE_DIR, filename)
-    with open(file_path, "wb") as f:
-        f.write(combined_pdf_bytes)
-
-    new_log = models.PrintLog(
-        created_at=now,
-        category_name="Printare Manuala", 
-        awb_count=len(awb_to_pdf_map),
-        user_ip=request.client.host,
-        pdf_path=file_path
-    )
-    db.add(new_log)
-
-    for shipment in shipments_data:
-        if shipment.awb in awb_to_pdf_map:
-            shipment.printed_at = now
-            new_log.entries.append(
-                models.PrintLogEntry(order_name=shipment.order.name, awb=shipment.awb)
+    for awb, shipment in shipment_map.items():
+        try:
+            courier_service = get_courier_service(shipment.courier)
+            account = await courier_common.get_courier_account_by_key(db, shipment.account_key)
+            if not account or not account.credentials:
+                failed_awbs.append(awb)
+                continue
+            
+            pdf_content = await courier_service.get_label(
+                awb=shipment.awb,
+                creds=account.credentials,
+                paper_size=shipment.paper_size
             )
+            if pdf_content:
+                merger.append(io.BytesIO(pdf_content))
+                successful_awbs.append(awb) # Adăugăm AWB-ul la lista de succes
+            else:
+                failed_awbs.append(awb)
+        except Exception as e:
+            logger.error(f"Eroare la procesarea AWB {awb} pentru printare: {e}")
+            failed_awbs.append(awb)
+    
+    if not merger.pages:
+        return JSONResponse(status_code=404, content={"detail": f"Etichetele nu au putut fi descărcate. AWB-uri eșuate: {', '.join(failed_awbs)}"})
 
-    await db.commit()
+    # === MODIFICARE: Actualizăm statusul pentru AWB-urile printate cu succes ===
+    if successful_awbs:
+        update_stmt = (
+            update(models.Shipment)
+            .where(models.Shipment.awb.in_(successful_awbs), models.Shipment.printed_at.is_(None))
+            .values(printed_at=datetime.utcnow())
+        )
+        await db.execute(update_stmt)
+        await db.commit()
+    # =======================================================================
 
-    return Response(
-        content=combined_pdf_bytes,
-        media_type='application/pdf',
-        headers={'Content-Disposition': 'inline; filename="AWB-uri_combinate.pdf"'}
-    )
+    output_pdf = io.BytesIO()
+    merger.write(output_pdf)
+    merger.close()
+    
+    return Response(content=output_pdf.getvalue(), media_type="application/pdf")
