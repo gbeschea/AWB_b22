@@ -10,136 +10,215 @@
         </ul>
     </nav>
     <h1>🚚 Setări Curieri</h1>
-    <p>Adaugă și configurează conturile de curier și cum sunt mapate din Shopify.</p>
+    <p>Adaugă și configurează conturile de curier, adresele de expeditor, profilele de expediție și mapările din Shopify.</p>
     <hr>
 
-    <h2>Conturi de Curier</h2>
+    <h2>Conturi de Curier și Expeditori</h2>
     <article>
-        <h3>Adaugă un cont nou</h3>
+        <h3>Adaugă un cont/expeditor nou</h3>
         <form action="{{ url_for('create_courier_account') }}" method="post">
-            <div class="grid">
-                <input type="text" name="name" placeholder="Nume afișat (ex: DPD Romania)" required>
-                <input type="text" name="account_key" placeholder="Cheie unică (ex: dpd-ro)" required>
-                <select name="courier_type" required onchange="showCourierFields(this.value, 'new')">
-                    <option value="" disabled selected>Alege tipul de curier</option>
-                    <option value="sameday">Sameday</option>
-                    <option value="dpd">DPD</option>
-                    <option value="econt">Econt</option>
-                </select>
-            </div>
-            <input type="text" name="tracking_url" placeholder="URL Tracking (se completează automat)">
-
-            <div id="fields-new-sameday" class="courier-fields" style="display:none;">
-                <label>Credențiale Sameday</label>
-                <div class="grid">
-                    <input type="text" name="cred_username" placeholder="Utilizator Sameday">
-                    <input type="password" name="cred_password" placeholder="Parolă Sameday">
-                </div>
-                <div class="grid">
-                    <input type="number" name="cred_pickup_point_id" placeholder="ID Punct de Ridicare">
-                    <input type="number" name="cred_default_service_id" placeholder="ID Serviciu Implicit">
-                </div>
-                 <div class="grid">
-                    <input type="text" name="cred_default_package_type" placeholder="Tip Colet Implicit">
-                    <input type="text" name="cred_awb_payment" placeholder="Plata AWB (Client/Expeditor)">
-                </div>
-            </div>
-
-            <div id="fields-new-dpd" class="courier-fields" style="display:none;">
-                <label>Credențiale DPD</label>
-                <div class="grid">
-                    <input type="text" name="cred_username" placeholder="Utilizator DPD">
-                    <input type="password" name="cred_password" placeholder="Parolă DPD">
-                </div>
-                <div class="grid">
-                    <input type="text" name="cred_clientSecret" placeholder="Client Secret">
-                    <input type="text" name="cred_pickupOfficeId" placeholder="ID Oficiu Ridicare">
-                </div>
-            </div>
             
-            <div id="fields-new-econt" class="courier-fields" style="display:none;">
-                <label>Credențiale Econt</label>
+            <fieldset>
+                <legend>Informații Cont</legend>
                 <div class="grid">
-                    <input type="text" name="cred_username" placeholder="Utilizator Econt">
-                    <input type="password" name="cred_password" placeholder="Parolă Econt">
+                    <div>
+                        <label for="accName">Nume Cont*</label>
+                        <input type="text" id="accName" name="name" placeholder="Ex: DPD Romania (Sediu Central)" required>
+                    </div>
+                    <div>
+                        <label for="accKey">Cheie Unică*</label>
+                        <input type="text" id="accKey" name="account_key" placeholder="Ex: dpd-ro-hq" required>
+                    </div>
+                    <div>
+                        <label for="accType">Tip Curier*</label>
+                        <select id="accType" name="courier_type" required onchange="showCourierFields(this.value, 'new')">
+                            <option value="" disabled selected>Alege tipul</option>
+                            <option value="sameday">Sameday</option>
+                            <option value="dpd">DPD</option>
+                            <option value="econt">Econt</option>
+                        </select>
+                    </div>
                 </div>
-                <label><input type="checkbox" name="cred_test_mode" role="switch"> Mod Test</label>
-            </div>
+            </fieldset>
+
+            <fieldset>
+                <legend>Adresă Expeditor</legend>
+                <div class="grid">
+                    <div>
+                        <label for="contactName">Nume Contact*</label>
+                        <input type="text" id="contactName" name="contact_name" required>
+                    </div>
+                    <div>
+                        <label for="phone">Telefon*</label>
+                        <input type="tel" id="phone" name="phone" required>
+                    </div>
+                    <div>
+                        <label for="email">Email</label>
+                        <input type="email" id="email" name="email">
+                    </div>
+                </div>
+                <label for="addressLine1">Adresă (stradă, nr., etc.)*</label>
+                <input type="text" id="addressLine1" name="address_line1" required>
+                
+                <div class="grid">
+                    <div>
+                        <label for="city">Oraș*</label>
+                        <input type="text" id="city" name="city" required>
+                    </div>
+                     <div>
+                        <label for="county">Județ*</label>
+                        <input type="text" id="county" name="county" required>
+                    </div>
+                    <div>
+                        <label for="postcode">Cod Poștal*</label>
+                        <input type="text" id="postcode" name="postcode" required>
+                    </div>
+                </div>
+            </fieldset>
+
+            <fieldset>
+                <legend>Credențiale API</legend>
+                <div id="fields-new-sameday" class="courier-fields" style="display:none;">
+                    <input type="text" name="sameday_username" placeholder="Sameday Username">
+                    <input type="password" name="sameday_password" placeholder="Sameday Password">
+                </div>
+                <div id="fields-new-dpd" class="courier-fields" style="display:none;">
+                    <input type="text" name="dpd_username" placeholder="DPD Username">
+                    <input type="password" name="dpd_password" placeholder="DPD Password">
+                    <input type="text" name="dpd_client_id" placeholder="DPD Client ID">
+                </div>
+                <div id="fields-new-econt" class="courier-fields" style="display:none;">
+                    <input type="text" name="econt_username" placeholder="Econt Username">
+                    <input type="password" name="econt_password" placeholder="Econt Password">
+                </div>
+            </fieldset>
             
             <button type="submit">Adaugă Cont</button>
         </form>
     </article>
+
+    <h3>Conturi Salvate</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Nume Cont</th>
+                <th>Cheie</th>
+                <th>Tip</th>
+                <th>Adresă Expeditor</th>
+                <th>Acțiuni</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for acc in accounts %}
+            <tr>
+                <td><strong>{{ acc.name }}</strong></td>
+                <td><code>{{ acc.account_key }}</code></td>
+                <td><span class="tag">{{ acc.courier_type | upper }}</span></td>
+                <td>
+                    {% if acc.credentials and acc.credentials.sender_address %}
+                        {{ acc.credentials.sender_address.contact_person }}, {{ acc.credentials.sender_address.street }}, {{ acc.credentials.sender_address.city }}
+                    {% else %}
+                        <span style="color: #999;">Fără adresă</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="{{ url_for('edit_courier_account_page', account_id=acc.id) }}" role="button" class="secondary outline">
+                        Editează
+                    </a>
+                </td>
+            </tr>
+        {% else %}
+            <tr><td colspan="5" style="text-align: center;">Nu există conturi de curier configurate.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    <hr>
     
-    {% for acc in accounts %}
-    <details>
-        <summary><strong>{{ acc.name }}</strong> - <code>{{ acc.account_key }}</code></summary>
-        <form action="{{ url_for('update_courier_account', account_id=acc.id) }}" method="post">
+   <h2 id="profiles">📦 Profile de Expediție (Șabloane)</h2>
+<article>
+    <h3>Adaugă un profil nou</h3>
+    <form action="{{ url_for('create_shipment_profile') }}" method="post">
+        
+        <div class="grid">
+            <div>
+                <label for="profileName">Nume Profil*</label>
+                <input type="text" id="profileName" name="name" placeholder="Ex: DPD Standard - Colet Mic" required>
+            </div>
+            <div>
+                <label for="profileAccount">Cont de curier asociat*</label>
+                <select id="profileAccount" name="account_key" required>
+                    <option value="" disabled selected>Alege un cont</option>
+                    {% for acc in accounts %}<option value="{{ acc.account_key }}">{{ acc.name }}</option>{% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <fieldset><legend>Setări Șablon pentru Expediere</legend>
             <div class="grid">
-                <input type="text" name="name" value="{{ acc.name }}" required>
-                <input type="text" name="account_key" value="{{ acc.account_key }}" required>
-                <input type="text" name="courier_type" value="{{ acc.courier_type }}" readonly>
+                <div>
+                    <label for="default_parcels">Nr. colete implicit</label>
+                    <input type="number" id="default_parcels" name="default_parcels" value="1">
+                </div>
+                <div>
+                    <label for="default_weight_kg">Greutate implicită (kg)</label>
+                    <input type="number" id="default_weight_kg" name="default_weight_kg" value="1.0" step="0.1">
+                </div>
             </div>
-            <input type="text" name="tracking_url" value="{{ acc.tracking_url }}">
+            <label>Dimensiuni implicite (cm)</label>
+            <div class="grid">
+                <div><input type="number" name="default_length_cm" placeholder="Lungime (L)"></div>
+                <div><input type="number" name="default_width_cm" placeholder="Lățime (l)"></div>
+                <div><input type="number" name="default_height_cm" placeholder="Înălțime (h)"></div>
+            </div>
+            <hr>
+            <div class="grid">
+                <div>
+                    <label for="default_service_id">Serviciu Implicit DPD (opțional)</label>
+                    <select id="default_service_id" name="default_service_id">
+                        <option value="">-- Nespecificat --</option>
+                        <option value="2505">2505: DPD STANDARD</option>
+                        <option value="2005">2005: CARGO NATIONAL</option>
+                        <option value="2212">2212: DPD REGIONAL CEE</option>
+                        <option value="2214">2214: CARGO REGIONAL</option>
+                        <option value="2303">2303: DPD INTERNATIONAL (RUTIER)</option>
+                    </select>
+                </div>
+                 <div>
+                    <label for="content_template">Format Conținut Colet</label>
+                    <input type="text" id="content_template" name="content_template" value="${orderName} / ${quantity} x ${sku}" maxlength="30">
+                </div>
+            </div>
+        </fieldset>
+        
+        <button type="submit">Salvează Profilul</button>
+    </form>
+</article>
 
-            {% if acc.courier_type == 'sameday' %}
-            <div class="courier-fields">
-                <label>Credențiale Sameday</label>
-                <div class="grid">
-                    <input type="text" name="cred_username" value="{{ acc.credentials.get('username', '') }}" placeholder="Utilizator Sameday">
-                    <input type="password" name="cred_password" value="" placeholder="{{ 'Parolă setată. Lasă gol pentru a nu schimba.' if acc.credentials.get('password') else 'Parolă Sameday' }}">
-                </div>
-                <div class="grid">
-                    <input type="number" name="cred_pickup_point_id" value="{{ acc.credentials.get('pickup_point_id', '') }}" placeholder="ID Punct de Ridicare">
-                    <input type="number" name="cred_default_service_id" value="{{ acc.credentials.get('default_service_id', '') }}" placeholder="ID Serviciu Implicit">
-                </div>
-                 <div class="grid">
-                    <input type="text" name="cred_default_package_type" value="{{ acc.credentials.get('default_package_type', '') }}" placeholder="Tip Colet Implicit">
-                    <input type="text" name="cred_awb_payment" value="{{ acc.credentials.get('awb_payment', '') }}" placeholder="Plata AWB">
-                </div>
-            </div>
-            {% endif %}
 
-            {% if acc.courier_type == 'dpd' %}
-            <div class="courier-fields">
-                <label>Credențiale DPD</label>
-                <div class="grid">
-                    <input type="text" name="cred_username" value="{{ acc.credentials.get('username', '') }}" placeholder="Utilizator DPD">
-                    <input type="password" name="cred_password" value="" placeholder="{{ 'Parolă setată. Lasă gol pentru a nu schimba.' if acc.credentials.get('password') else 'Parolă DPD' }}">
-                </div>
-                <div class="grid">
-                    <input type="text" name="cred_clientSecret" value="{{ acc.credentials.get('clientSecret', '') }}" placeholder="Client Secret">
-                    <input type="text" name="cred_pickupOfficeId" value="{{ acc.credentials.get('pickupOfficeId', '') }}" placeholder="ID Oficiu Ridicare">
-                </div>
-            </div>
-            {% endif %}
-
-            {% if acc.courier_type == 'econt' %}
-            <div class="courier-fields">
-                <label>Credențiale Econt</label>
-                 <div class="grid">
-                    <input type="text" name="cred_username" value="{{ acc.credentials.get('username', '') }}" placeholder="Utilizator Econt">
-                    <input type="password" name="cred_password" value="" placeholder="{{ 'Parolă setată. Lasă gol pentru a nu schimba.' if acc.credentials.get('password') else 'Parolă Econt' }}">
-                </div>
-                <label><input type="checkbox" name="cred_test_mode" role="switch" {% if acc.credentials.get('test_mode') %}checked{% endif %}> Mod Test</label>
-            </div>
-            {% endif %}
-            
-            <select name="is_active">
-                <option value="true" {% if acc.is_active %}selected{% endif %}>Activ</option>
-                <option value="false" {% if not acc.is_active %}selected{% endif %}>Inactiv</option>
-            </select>
-            <button type="submit">Actualizează</button>
-        </form>
-    </details>
+<h3>Profile Salvate</h3>
+<table>
+   <thead><tr><th>Nume Profil</th><th>Cont Asociat</th><th>Acțiuni</th></tr></thead>
+   <tbody>
+    {% for profile in shipment_profiles %}
+        <tr>
+            <td>{{ profile.name }}</td>
+            <td><code>{{ profile.account_key }}</code></td>
+            <td><a href="#">Editează</a></td>
+        </tr>
+    {% else %}
+        <tr><td colspan="3" style="text-align: center;">Nu ai profile salvate.</td></tr>
     {% endfor %}
+   </tbody>
+</table>
 
     <hr>
+
     <h2>Mapări Shopify</h2>
     <article>
         <h3>Adaugă o mapare nouă</h3>
         <form action="{{ url_for('create_courier_mapping') }}" method="post">
             <div class="grid">
-                <input type="text" name="shopify_name" placeholder="Nume din Shopify (ex: DPD Jaragua)" required>
+                <input type="text" name="shopify_name" placeholder="Nume livrare în Shopify" required>
                 <select name="account_key" required>
                     <option value="" disabled selected>Alege un cont</option>
                     {% for acc in accounts %}<option value="{{ acc.account_key }}">{{ acc.name }} ({{ acc.account_key }})</option>{% endfor %}
@@ -148,7 +227,6 @@
             <button type="submit">Adaugă Mapare</button>
         </form>
     </article>
-
     <table>
         <thead><tr><th>Nume Shopify</th><th>Cont Mapat</th></tr></thead>
         <tbody>
@@ -163,23 +241,14 @@
 </div>
 
 <script>
-    const defaultUrls = {{ default_tracking_urls | tojson }};
-
+    // Am eliminat din scriptul tău partea cu `tracking_url` care nu mai există în formular
     function showCourierFields(courierType, formId) {
-        document.querySelectorAll('#fields-' + formId + ' .courier-fields, .courier-fields[id^="fields-' + formId + '-"]').forEach(function(el) {
-            el.style.display = 'none';
-        });
-        
-        var fieldsToShow = document.getElementById('fields-' + formId + '-' + courierType);
+        document.querySelectorAll('.courier-fields').forEach(el => el.style.display = 'none');
+        const fieldsToShow = document.getElementById('fields-' + formId + '-' + courierType);
         if (fieldsToShow) {
-            fieldsToShow.style.display = 'block';
-        }
-
-        if (formId === 'new') {
-            const trackingUrlInput = document.querySelector('form[action="{{ url_for('create_courier_account') }}"] input[name="tracking_url"]');
-            if (trackingUrlInput) {
-                trackingUrlInput.value = defaultUrls[courierType] || '';
-            }
+            // Am schimbat în 'grid' pentru o aliniere mai bună
+            fieldsToShow.style.display = 'grid'; 
+            fieldsToShow.style.gap = '1rem';
         }
     }
 </script>

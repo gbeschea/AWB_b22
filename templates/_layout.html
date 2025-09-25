@@ -12,6 +12,6 @@
     <main class="container">
         {% block content %}{% endblock %}
     </main>
-    {% block scripts %}{% endblock %}
+        <script src="{{ url_for('static', path='js/main.js') }}"></script>
 </body>
 </html>

@@ -1,0 +1,59 @@
+{% extends "_layout.html" %}
+{% block title %}Editare Cont Curier - {{ account.name }}{% endblock %}
+
+{% block content %}
+<div class="container">
+    <nav aria-label="breadcrumb">
+        <ul>
+            <li><a href="{{ url_for('get_settings_page') }}">Setări</a></li>
+            <li><a href="{{ url_for('get_couriers_page') }}">Curieri</a></li>
+            <li>Editare: {{ account.name }}</li>
+        </ul>
+    </nav>
+    <h1>📝 Editare Cont/Expeditor</h1>
+
+    <article>
+        {% set creds = account.credentials or {} %}
+        {% set sender_address = creds.get('sender_address', {}) %}
+        {% set api_creds = creds.get('api', {}) %}
+
+        <form action="{{ url_for('handle_edit_courier_account_form', account_id=account.id) }}" method="post">
+            <fieldset><legend>Informații Cont</legend>
+                <div class="grid">
+                    <div><label>Nume Cont*</label><input type="text" name="name" value="{{ account.name }}" required></div>
+                    <div><label>Cheie Unică*</label><input type="text" name="account_key" value="{{ account.account_key }}" required></div>
+                    <div><label>Tip Curier*</label>
+                        <select name="courier_type" required>
+                            <option value="dpd" {% if account.courier_type == 'dpd' %}selected{% endif %}>DPD</option>
+                            <option value="sameday" {% if account.courier_type == 'sameday' %}selected{% endif %}>Sameday</option>
+                        </select>
+                    </div>
+                </div>
+            </fieldset>
+            <fieldset><legend>Adresă Expeditor</legend>
+                <div class="grid">
+                    <div><label>Nume Contact*</label><input type="text" name="contact_name" value="{{ sender_address.get('contact_person', '') }}" required></div>
+                    <div><label>Telefon*</label><input type="tel" name="phone" value="{{ sender_address.get('phone', '') }}" required></div>
+                    <div><label>Email</label><input type="email" name="email" value="{{ sender_address.get('email', '') }}"></div>
+                </div>
+                <label>Adresă (stradă, nr.)*</label><input type="text" name="address_line1" value="{{ sender_address.get('street', '') }}" required>
+                <div class="grid">
+                    <div><label>Oraș*</label><input type="text" name="city" value="{{ sender_address.get('city', '') }}" required></div>
+                    <div><label>Județ*</label><input type="text" name="county" value="{{ sender_address.get('county', '') }}" required></div>
+                    <div><label>Cod Poștal*</label><input type="text" name="postcode" value="{{ sender_address.get('postal_code', '') }}" required></div>
+                </div>
+            </fieldset>
+            <fieldset><legend>Credențiale API (lasă gol pentru a nu schimba parola)</legend>
+                <input type="text" name="dpd_username" value="{{ api_creds.get('username', '') }}" placeholder="Username DPD">
+                <input type="password" name="dpd_password" placeholder="Parolă nouă DPD (opțional)">
+                <input type="text" name="dpd_client_id" value="{{ api_creds.get('client_id', '') }}" placeholder="Client ID DPD">
+            </fieldset>
+
+            <div class="grid">
+                <button type="submit">Salvează Modificările</button>
+                <a href="{{ url_for('get_couriers_page') }}" role="button" class="secondary">Anulează</a>
+            </div>
+        </form>
+    </article>
+</div>
+{% endblock %}

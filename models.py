@@ -90,6 +90,8 @@ class Order(Base):
   shipments = relationship('Shipment', back_populates='order', cascade='all, delete-orphan')
   fulfillment_orders = relationship('FulfillmentOrder', back_populates='order', cascade='all, delete-orphan')
   address_validations = relationship("AddressValidation", back_populates="order", cascade="all, delete-orphan")
+  assigned_profile_id = Column(Integer, ForeignKey('shipment_profiles.id'), nullable=True)
+  assigned_profile = relationship("ShipmentProfile")
 
 
 class Shipment(Base):
@@ -187,3 +189,23 @@ class AddressValidation(Base):
     suggestions = Column(JSONB)
     
     order = relationship("Order", back_populates="address_validations")
+
+class ShipmentProfile(Base):
+    __tablename__ = 'shipment_profiles'
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), unique=True, nullable=False)
+    account_key = Column(String(64), ForeignKey('courier_accounts.account_key'), nullable=False)
+    default_parcels = Column(Integer, default=1)
+    default_weight_kg = Column(Float, default=1.0)
+    default_width_cm = Column(Integer, nullable=True)
+    default_height_cm = Column(Integer, nullable=True)
+    default_length_cm = Column(Integer, nullable=True)
+    content_template = Column(String(255), default='${orderName} / ${quantity} x ${sku}')
+    default_service_id = Column(Integer, nullable=True) # Asigură-te că ai și acest câmp
+    default_payer = Column(String(32), default='SENDER')
+
+    # Stocăm un șablon al payload-ului DPD
+    # Aici pot fi salvate setările refolosibile
+    dpd_payload_template = Column(JSONB, nullable=True)
+
+    account = relationship("CourierAccount")

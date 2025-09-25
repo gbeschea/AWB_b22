@@ -1,108 +1,111 @@
-from __future__ import annotations
-
-import logging
-from pathlib import Path
+# main.py
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
-# Settings (dotenv/env based)
+from routes import (
+    store_categories, printing, logs, orders, sync, labels, actions,
+    settings as settings_router, validation, webhooks, processing,
+    # === AICI ESTE MODIFICAREA: am adăugat 'background' la import ===
+    background, profiles,
+    couriers as couriers_routes
+)
+from websocket_manager import manager
+from settings import settings
+from database import engine
+import logging
+
+# Optional: close shared HTTP client used by courier services
 try:
-    from settings import settings  # type: ignore
-except Exception:  # pragma: no cover - keep app bootable even if settings fails during codegen
-    class _Dummy:
-        PROJECT_NAME = "AWB Hub"
-        DEBUG = True
-    settings = _Dummy()  # type: ignore
+    from services.couriers import _http_client as couriers_http_client
+except Exception:
+    couriers_http_client = None
 
-# ----- App -----
 app = FastAPI(
-    title=getattr(settings, "PROJECT_NAME", "AWB Hub"),
-    description="""Hub pentru managementul comenzilor, generarea AWB-urilor
-    și integrarea cu curieri (DPD, Sameday etc.).""".strip(),
-    version="1.0.0",
+    title="AWB Hub",
+    description="Aplicatie pentru managementul comenzilor și generarea de AWB-uri.",
+    version="1.0.0"
 )
 
-# CORS (lax pentru dev; poți restrânge ulterior)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Static
-_static_dir_candidates = [Path("static"), Path("./static")]
-for _d in _static_dir_candidates:
-    if _d.exists():
-        app.mount("/static", StaticFiles(directory=str(_d)), name="static")
-        break
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Routers – încearcă mai întâi din pachetul `routes/`, apoi fallback la module top-level
-def _include_router_if_exists(module_name: str, alias: str | None = None):
-    mod = None
-    try:
-        mod = __import__(f"routes.{module_name}", fromlist=["router"])  # type: ignore
-    except Exception:
+# Routers
+app.include_router(orders.router, tags=["Orders"])
+app.include_router(processing.router, tags=["Processing"])
+app.include_router(sync.router, tags=["Sync"])
+app.include_router(labels.router, tags=["Labels"])
+app.include_router(settings_router.router, tags=["Settings"])
+app.include_router(validation.router, tags=["Validation"])
+app.include_router(webhooks.router, tags=["Webhooks"])
+app.include_router(couriers_routes.settings_router)
+app.include_router(couriers_routes.data_router)
+app.include_router(printing.router, tags=["Printing"])
+app.include_router(logs.router, tags=["Logs"])
+app.include_router(store_categories.router, tags=["Store Categories"])
+# === AICI ESTE MODIFICAREA: am adăugat router-ul pentru background ===
+app.include_router(background.router, tags=["Background Tasks"])
+app.include_router(actions.router)
+app.include_router(profiles.html_router) 
+app.include_router(profiles.api_router)
+
+
+@app.on_event("startup")
+async def on_startup():
+    # Asigură-te că vizualizarea orders_view există
+    view_sql = """
+    CREATE OR REPLACE VIEW orders_view AS
+    WITH latest_shipment AS (
+      SELECT s.order_id, s.last_status, s.last_status_at, s.id,
+             ROW_NUMBER() OVER (PARTITION BY s.order_id ORDER BY s.last_status_at NULLS LAST, s.id DESC) AS rn
+      FROM shipments s
+    )
+    SELECT
+      o.id,
+      CASE
+        WHEN ls.last_status ILIKE 'delivered%%' OR ls.last_status ILIKE '%%livrat%%' THEN 'delivered'
+        WHEN ls.last_status ILIKE '%%refus%%' OR ls.last_status ILIKE '%%return%%' THEN 'refused'
+        WHEN ls.last_status ILIKE '%%cancel%%' OR ls.last_status ILIKE '%%anulat%%' THEN 'canceled'
+        WHEN ls.last_status ILIKE '%%locker%%' OR ls.last_status ILIKE '%%parcelshop%%' OR ls.last_status ILIKE '%%pick-up%%' THEN 'pickup_office'
+        WHEN ls.last_status ILIKE '%%in curs%%' OR ls.last_status ILIKE '%%tranzit%%' OR ls.last_status ILIKE 'out for delivery%%' OR ls.last_status ILIKE 'in transit%%' THEN 'in_transit'
+        WHEN ls.last_status ILIKE '%%expediat%%' OR ls.last_status ILIKE '%%warehouse%%' OR ls.last_status ILIKE '%%pick-up%%' THEN 'shipped'
+        WHEN ls.last_status ILIKE '%%proces%%' OR ls.last_status ILIKE '%%registered%%' OR ls.last_status ILIKE '%%awb%%' THEN 'processed'
+        ELSE NULL
+      END AS mapped_courier_status
+    FROM orders o
+    LEFT JOIN latest_shipment ls ON ls.order_id = o.id AND ls.rn = 1;
+    """
+    async with engine.begin() as conn:
+        await conn.execute(text(view_sql))
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    if couriers_http_client:
         try:
-            mod = __import__(module_name, fromlist=["router"])  # type: ignore
+            await couriers_http_client.aclose()
         except Exception:
-            logging.getLogger(__name__).info("Router '%s' nu a fost găsit; îl sar.", module_name)
-            return
-    if hasattr(mod, "router"):
-        app.include_router(getattr(mod, "router"), tags=[alias or module_name])
-    else:
-        logging.getLogger(__name__).warning("Modulul '%s' nu are `router`.", module_name)
-
-for name, alias in [
-    ("orders", "Orders"),
-    ("labels", "Labels"),
-    ("printing", "Print Hub"),
-    ("validation", "Validation Hub"),
-    ("settings", "Settings"),
-    ("logs", "Print Logs"),
-    ("sync", "Sync"),
-    ("webhooks", "Webhooks"),
-    ("processing", "Processing"),
-    ("stores", "Stores"),
-    ("store_categories", "Store Categories"),
-    ("couriers", "Couriers"),
-    ("actions", "Actions"),
-    ("background", "Background"),
-]:
-    _include_router_if_exists(name, alias)
-
-# WebSocket: status progres sincronizări/printări
-try:
-    from websocket_manager import manager  # type: ignore
-except Exception:
-    manager = None  # type: ignore
+            pass
 
 @app.websocket("/ws/status")
-async def ws_status(websocket: WebSocket):
-    if manager is None:
-        # fallback: accept & ignoră mesaje, ca să nu crape UI-ul
-        await websocket.accept()
-        try:
-            while True:
-                await websocket.receive_text()
-        except WebSocketDisconnect:
-            return
-    else:
-        await manager.connect(websocket)
-        try:
-            while True:
-                await websocket.receive_text()
-        except WebSocketDisconnect:
-            manager.disconnect(websocket)
-
-# Root + health
-@app.get("/", tags=["Root"])
-def root():
-    return {"message": "AWB Hub is running"}
-
-@app.get("/healthz", tags=["Root"])
-def healthz():
-    return {"status": "ok"}
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
