@@ -69,3 +69,4 @@ async def get_courier_categories(db: AsyncSession):
     """Preia toate categoriile de curieri din baza de date."""
     result = await db.execute(select(models.CourierCategory))
     return result.scalars().all()
+
