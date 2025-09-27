@@ -3,7 +3,6 @@
 from fastapi import APIRouter, Depends, Request, Form, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from typing import List, Optional
 
 import models
@@ -11,7 +10,15 @@ import schemas
 import crud.couriers as crud
 from database import get_db
 from templating import templates
-from services.couriers.dpd import DPDCourier as DpdService 
+from services.couriers.dpd import DPDCourier as DpdService
+import settings
+
+from sqlalchemy import select, text
+from types import SimpleNamespace
+
+from sqlalchemy.exc import IntegrityError
+
+
 
 # Router pentru pagina de setări (formulare HTML)
 settings_router = APIRouter(prefix='/settings/couriers', tags=['Settings - Couriers'])
@@ -23,18 +30,29 @@ data_router = APIRouter(prefix='/api/couriers', tags=['Couriers Data API'])
 async def get_couriers_settings_page(request: Request, db: AsyncSession = Depends(get_db)):
     accounts = await crud.get_courier_accounts(db)
     mappings = await crud.get_courier_mappings(db)
-    
-    # Adăugăm încărcarea profilelor
-    profiles_result = await db.execute(select(models.ShipmentProfile))
-    shipment_profiles = profiles_result.scalars().all()
 
-    context = {
+    # ORM -> modele
+    result = await db.execute(select(models.ShipmentProfile).order_by(models.ShipmentProfile.id))
+    orm_profiles = result.scalars().all()  # are elemente (ai confirmat)
+
+    # Convertim în listă de dict-uri 100% Jinja-friendly
+    shipment_profiles_rows = [
+        {"id": p.id, "name": p.name, "account_key": p.account_key}
+        for p in orm_profiles
+    ]
+
+    # (opțional) debug direct din SQL – lăsat provizoriu
+    count_profiles = (await db.execute(text("SELECT COUNT(*) FROM shipment_profiles"))).scalar()
+
+    return templates.TemplateResponse("settings_couriers.html", {
         "request": request,
         "accounts": accounts,
         "mappings": mappings,
-        "shipment_profiles": shipment_profiles, # Și le trimitem la pagină
-    }
-    return templates.TemplateResponse("settings_couriers.html", context)
+        "shipment_profiles": shipment_profiles_rows,  # <-- acum e listă de dict-uri
+        "debug_profiles_count": count_profiles,
+        "debug_len": len(shipment_profiles_rows),
+    })
+
 
 
 
@@ -203,3 +221,62 @@ async def handle_edit_courier_account_form(
     )
     
     return RedirectResponse(url=settings_router.url_path_for("get_couriers_page"), status_code=303)
+
+
+@settings_router.get("/profiles/{profile_id}/edit", name="edit_shipment_profile_page")
+async def edit_shipment_profile_page(profile_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    profile = await db.get(models.ShipmentProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profilul nu a fost găsit.")
+    # pentru dropdown-ul de conturi:
+    accounts = await crud.get_courier_accounts(db)
+    return templates.TemplateResponse("settings_profiles_edit.html", {
+        "request": request, "profile": profile, "accounts": accounts
+    })
+
+@settings_router.post("/profiles/{profile_id}/edit", name="update_shipment_profile")
+async def update_shipment_profile(profile_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    profile = await db.get(models.ShipmentProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profilul nu a fost găsit.")
+    form = await request.form()
+
+    def _to_int(v): 
+        try:
+            return int(v) if v not in (None, "", "None") else None
+        except: 
+            return None
+    def _to_float(v):
+        try:
+            return float(v) if v not in (None, "", "None") else None
+        except:
+            return None
+
+    profile.name = form.get("name") or profile.name
+    profile.account_key = form.get("account_key") or profile.account_key
+    profile.default_parcels = _to_int(form.get("default_parcels")) or profile.default_parcels
+    profile.default_weight_kg = _to_float(form.get("default_weight_kg")) or profile.default_weight_kg
+    profile.default_length_cm = _to_int(form.get("default_length_cm"))
+    profile.default_width_cm  = _to_int(form.get("default_width_cm"))
+    profile.default_height_cm = _to_int(form.get("default_height_cm"))
+    profile.default_service_id = _to_int(form.get("default_service_id"))
+    profile.content_template = form.get("content_template") or profile.content_template
+
+    await db.commit()
+    return RedirectResponse(url=settings_router.url_path_for("get_couriers_page") + "#profiles", status_code=303)
+
+@settings_router.post("/profiles/{profile_id}/delete", name="delete_shipment_profile")
+async def delete_shipment_profile(profile_id: int, db: AsyncSession = Depends(get_db)):
+    profile = await db.get(models.ShipmentProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profilul nu a fost găsit.")
+    try:
+        await db.delete(profile)
+        await db.commit()
+        return RedirectResponse(url=settings_router.url_path_for("get_couriers_page") + "#profiles", status_code=303)
+    except IntegrityError:
+        # profilul e folosit (FK în orders.assigned_profile_id) -> redirecționăm cu mesaj
+        return RedirectResponse(
+            url=settings_router.url_path_for("get_couriers_page") + "#profiles?error=profil_in_folosinta",
+            status_code=303
+        )

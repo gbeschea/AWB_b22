@@ -1,0 +1,63 @@
+
+{% extends "_layout.html" %}
+{% block title %}Editare Profil - {{ profile.name }}{% endblock %}
+
+{% block content %}
+<div class="container">
+  <nav aria-label="breadcrumb">
+    <ul>
+      <li><a href="{{ url_for('get_settings_page') }}">Setări</a></li>
+      <li><a href="{{ url_for('get_couriers_page') }}">Curieri</a></li>
+      <li>Editare profil: {{ profile.name }}</li>
+    </ul>
+  </nav>
+
+  <h1>📝 Editare Profil Expediție</h1>
+  <form action="{{ url_for('update_shipment_profile', profile_id=profile.id) }}" method="post">
+    <div class="grid">
+      <div>
+        <label>Nume Profil*</label>
+        <input type="text" name="name" value="{{ profile.name }}" required>
+      </div>
+      <div>
+        <label>Cont de curier asociat*</label>
+        <select name="account_key" required>
+          {% for acc in accounts %}
+            <option value="{{ acc.account_key }}" {% if acc.account_key == profile.account_key %}selected{% endif %}>
+              {{ acc.name }} ({{ acc.account_key }})
+            </option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <fieldset><legend>Setări implicite</legend>
+      <div class="grid">
+        <div><label>Nr. colete</label><input type="number" name="default_parcels" value="{{ profile.default_parcels or 1 }}"></div>
+        <div><label>Greutate (kg)</label><input type="number" step="0.1" name="default_weight_kg" value="{{ profile.default_weight_kg or 1.0 }}"></div>
+      </div>
+      <label>Dimensiuni (cm)</label>
+      <div class="grid">
+        <div><input type="number" name="default_length_cm" placeholder="L" value="{{ profile.default_length_cm or '' }}"></div>
+        <div><input type="number" name="default_width_cm"  placeholder="l" value="{{ profile.default_width_cm  or '' }}"></div>
+        <div><input type="number" name="default_height_cm" placeholder="h" value="{{ profile.default_height_cm or '' }}"></div>
+      </div>
+      <div class="grid">
+        <div>
+          <label>Serviciu DPD (ID)</label>
+          <input type="number" name="default_service_id" value="{{ profile.default_service_id or '' }}">
+        </div>
+        <div>
+          <label>Format Conținut Colet</label>
+          <input type="text" name="content_template" value="{{ profile.content_template or '' }}" maxlength="255">
+        </div>
+      </div>
+    </fieldset>
+
+    <div class="grid" style="margin-top:1rem;">
+      <button type="submit">Salvează</button>
+      <a href="{{ url_for('get_couriers_page') }}#profiles" role="button" class="secondary">Anulează</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
