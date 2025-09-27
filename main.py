@@ -17,6 +17,9 @@ from settings import settings
 from database import engine
 import logging
 
+from routes.couriers_profiles_full import settings_router as couriers_router
+
+
 # Optional: close shared HTTP client used by courier services
 try:
     from services.couriers import _http_client as couriers_http_client
@@ -28,6 +31,9 @@ app = FastAPI(
     description="Aplicatie pentru managementul comenzilor și generarea de AWB-uri.",
     version="1.0.0"
 )
+
+app.include_router(couriers_router)
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

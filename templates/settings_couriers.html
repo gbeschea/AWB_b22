@@ -195,21 +195,49 @@
 </article>
 
 
-<h3>Profile Salvate</h3>
-<table>
-   <thead><tr><th>Nume Profil</th><th>Cont Asociat</th><th>Acțiuni</th></tr></thead>
-   <tbody>
-    {% for profile in shipment_profiles %}
-        <tr>
-            <td>{{ profile.name }}</td>
-            <td><code>{{ profile.account_key }}</code></td>
-            <td><a href="#">Editează</a></td>
-        </tr>
-    {% else %}
-        <tr><td colspan="3" style="text-align: center;">Nu ai profile salvate.</td></tr>
-    {% endfor %}
-   </tbody>
-</table>
+    <div class="card mb-4">
+        <div class="card-header">
+            <i class="fas fa-table me-1"></i>
+            Profile Salvate
+        </div>
+
+        <div class="card-body">
+            <table class="table table-bordered table-striped">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Nume Profil</th>
+                        <th>Cont Curier Asociat</th>
+                        <th>Acțiuni</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for profile in shipment_profiles %}
+                <tr>
+                    <td>{{ profile.id }}</td>
+                    <td>{{ profile.name }}</td>
+                    <td>{{ profile.account_key }}</td>
+                    <td>
+                    <a href="{{ url_for('edit_shipment_profile_page', profile_id=profile.id) }}" role="button" class="btn btn-sm btn-primary">
+                        Editează
+                    </a>
+                    <form action="{{ url_for('delete_shipment_profile', profile_id=profile.id) }}" method="post" style="display:inline"
+                            onsubmit="return confirm('Sigur vrei să ștergi profilul {{ profile.name }}?');">
+                        <button class="btn btn-sm btn-danger">Șterge</button>
+                    </form>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="4" class="text-center">Nu există profile salvate.</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+
+
+            </table>
+        </div>
+    </div>
 
     <hr>
 
