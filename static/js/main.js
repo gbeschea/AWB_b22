@@ -187,12 +187,20 @@ document.addEventListener('DOMContentLoaded', function () {
     el('page-input')?.addEventListener('change', () => el('goToPageForm')?.submit());
 
     // ---- Validare adrese (batch) ----
-    el('validateAddressesButton')?.addEventListener('click', () => {
+    el('validateAddressesButton')?.addEventListener('click', function () {
+      const storeIds = Array.from(document.querySelectorAll('.store-checkbox:checked'))
+        .map(cb => parseInt(cb.value, 10));
+      if (storeIds.length === 0) return alert('Te rog selectează cel puțin un magazin.');
+
+      const days = parseInt(el('days-input')?.value || '30', 10);
+
       showSyncProgress('Inițiază validarea tuturor adreselor...');
-      fetch('/sync/validate-addresses', { method: 'POST' })
-        .then(r => r.json())
-        .then(d => { showSyncProgress(d.message || 'Proces început.'); setTimeout(() => hideSyncProgress(), 5000); })
-        .catch(err => { console.error(err); showSyncProgress('Eroare la pornirea procesului.', true); });
+      // reutilizăm helper-ul tău generic, exact ca la orders/full
+      startMainPageSync(
+        '/sync/validate-addresses',
+        JSON.stringify({ store_ids: storeIds, days: days }),
+        { headers: { 'Content-Type': 'application/json' } }
+      );
     });
 
     // set stare inițială banner

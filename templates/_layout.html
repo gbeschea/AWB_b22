@@ -4,14 +4,25 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}AWB Hub{% endblock %}</title>
+
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"/>
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    
     <link rel="stylesheet" href="{{ url_for('static', path='css/style.css') }}">
+    
+    {% block head_extra %}{% endblock %}
 </head>
 <body>
+
     {% include "_nav.html" %}
+
     <main class="container">
         {% block content %}{% endblock %}
     </main>
-        <script src="{{ url_for('static', path='js/main.js') }}"></script>
+
+    <script src="{{ url_for('static', path='js/main.js') }}"></script>
+    
+    {% block scripts %}{% endblock %}
 </body>
 </html>

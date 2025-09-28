@@ -22,13 +22,14 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple, Optional
 from collections import Counter
 from difflib import SequenceMatcher
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from schemas import ValidationResult
+import models
 
 
 
@@ -564,3 +565,37 @@ async def validate_address_for_order(db: AsyncSession, order: Any) -> Validation
         errors=errors or [],
         suggestions=suggestions or []
     )
+
+
+async def validate_unvalidated_orders(
+    db: AsyncSession,
+    days: Optional[int] = None,
+    store_ids: Optional[List[int]] = None,
+):
+    """
+    Selectează toate comenzile cu address_status='nevalidat' și rulează validatorul,
+    opțional filtrate după un interval de zile și după magazin(e).
+    """
+    try:
+        stmt = select(models.Order).where(models.Order.address_status == 'nevalidat')
+
+        if days:
+            from datetime import datetime, timezone, timedelta
+            start_date = datetime.now(timezone.utc) - timedelta(days=days)
+            stmt = stmt.where(models.Order.created_at >= start_date)
+
+        if store_ids:
+            stmt = stmt.where(models.Order.store_id.in_(store_ids))
+
+        result = await db.execute(stmt)
+        orders_to_validate = result.scalars().all()
+        if not orders_to_validate:
+            return
+
+        for order in orders_to_validate:
+            await validate_address_for_order(db, order)
+
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        print(f"Eroare la validarea în masă a adreselor nevalidate: {e}")

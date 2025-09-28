@@ -4,6 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 import models
+from typing import List
+
 
 async def get_courier_accounts(db: AsyncSession):
     """Preia toate conturile de curieri din baza de date."""
@@ -70,3 +72,9 @@ async def get_courier_categories(db: AsyncSession):
     result = await db.execute(select(models.CourierCategory))
     return result.scalars().all()
 
+async def get_all_shipment_profiles(db: AsyncSession) -> List[models.ShipmentProfile]:
+    """Preia toate profilele de expediere din baza de date."""
+    result = await db.execute(
+        select(models.ShipmentProfile).order_by(models.ShipmentProfile.name)
+    )
+    return result.scalars().all()
