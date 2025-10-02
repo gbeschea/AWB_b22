@@ -6,18 +6,23 @@
         <li><a href="{{ url_for('view_orders') }}">Comenzi</a></li>
         <li><a href="{{ url_for('get_print_view_page') }}">Print Hub</a></li>
         <li>
-                <a href="{{ url_for('get_processing_page') }}"
-                   class="{% if 'processing' in request.url.path %}is-active{% endif %}">
-                   Procesare Comenzi
-                </a>
-            </li>
-            <li>
-                <a href="{{ url_for('get_validation_page') }}" 
-                   class="{% if 'validation' in request.url.path %}is-active{% endif %}">
-                   Validation Hub
-                </a>
-            </li>
-
+            <a href="{{ url_for('get_processing_page') }}"
+               class="{% if 'processing' in request.url.path %}is-active{% endif %}">
+               Procesare Comenzi
+            </a>
+        </li>
+        <li>
+            <a href="{{ url_for('get_validation_page') }}" 
+               class="{% if 'validation' in request.url.path %}is-active{% endif %}">
+               Validation Hub
+            </a>
+        </li>
+        <li>
+            <a href="{{ url_for('get_financials_page') }}"
+               class="{% if 'financials' in request.url.path %}is-active{% endif %}">
+               Gestiune Financiară
+            </a>
+        </li>
         <li><a href="{{ url_for('get_print_logs_page') }}">Istoric Printări</a></li>
         <li><a href="{{ url_for('get_settings_page') }}" role="button" class="secondary outline">Setări</a></li>
     </ul>

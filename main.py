@@ -8,9 +8,9 @@ from sqlalchemy import text
 from routes import (
     store_categories, printing, logs, orders, sync, labels, actions,
     settings as settings_router, validation, webhooks, processing,
-    # === AICI ESTE MODIFICAREA: am adăugat 'background' la import ===
     background, profiles,
-    couriers as couriers_routes
+    couriers as couriers_routes,
+    financials # <-- MODIFICARE: Am adăugat noul router
 )
 from websocket_manager import manager
 from settings import settings
@@ -64,8 +64,8 @@ app.include_router(couriers_routes.data_router)
 app.include_router(printing.router, tags=["Printing"])
 app.include_router(logs.router, tags=["Logs"])
 app.include_router(store_categories.router, tags=["Store Categories"])
-# === AICI ESTE MODIFICAREA: am adăugat router-ul pentru background ===
 app.include_router(background.router, tags=["Background Tasks"])
+app.include_router(financials.router, tags=["Financials"]) # <-- MODIFICARE: Am inclus router-ul aici
 app.include_router(actions.router)
 app.include_router(profiles.html_router) 
 app.include_router(profiles.api_router)
