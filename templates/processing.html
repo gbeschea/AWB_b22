@@ -135,6 +135,8 @@
             data-weight="{{ profile.default_weight_kg or 1.0 }}"
             data-payer="{{ (profile.default_payer or 'SENDER') | upper }}"
             data-content-template="{{ profile.content_template or '' }}"
+            data-third-party-client-id="{{ profile.third_party_client_id or '' }}"
+
           >
             {{ profile.name }}
           </option>
@@ -170,10 +172,30 @@
             </div>
              <div>
                 <label for="payer">Plătitor Transport</label>
-                <select id="payer" name="payer">
-                    <option value="SENDER" selected>Expeditor</option>
+                  <select id="payer" name="payer">
+                    <option value="SENDER">Expeditor</option>
                     <option value="RECIPIENT">Destinatar</option>
-                </select>
+                    <option value="THIRD_PARTY">Contract/tert</option>
+                  </select>
+                  
+                  <!-- câmp vizibil doar pentru Contract/tert -->
+                  <div id="third-party-wrap" style="display:none;margin-top:8px">
+                    <label>Client/Contract ID DPD (plătitor)</label>
+                    <input type="text" name="third_party_client_id" id="third_party_client_id" placeholder="ex: 729473200001">
+                  </div>
+
+
+            </div>
+            <div>
+            <label for="package">Mod ambalare</label>
+              <select id="package" name="package">
+                <option value="">— din profil —</option>
+                <option value="BOX">CUTIE DE CARTON</option>
+                <option value="PALLET">PALET</option>
+                <option value="ENVELOPE">PLIC</option>
+                <option value="BAG">SAC</option>
+                <option value="WRAP">FOLIE</option>
+              </select>
             </div>
           </div>
       </fieldset>

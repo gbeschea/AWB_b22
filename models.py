@@ -7,6 +7,8 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.types import JSON
 from sqlalchemy.sql import func
 from database import Base 
+import sqlalchemy as sa
+
 
 # --- Hărți pentru relații Many-to-Many ---
 courier_category_map = Table('courier_category_map', Base.metadata,
@@ -207,5 +209,6 @@ class ShipmentProfile(Base):
     # Stocăm un șablon al payload-ului DPD
     # Aici pot fi salvate setările refolosibile
     dpd_payload_template = Column(JSONB, nullable=True)
+    default_packing = sa.Column(sa.String(20), nullable=True)  # DPD: BOX | PALLET | ENVELOPE | BAG | WRAP
 
     account = relationship("CourierAccount")
