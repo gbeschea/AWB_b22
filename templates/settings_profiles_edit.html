@@ -1,4 +1,3 @@
-
 {% extends "_layout.html" %}
 {% block title %}Editare Profil - {{ profile.name }}{% endblock %}
 
@@ -23,9 +22,9 @@
         <label>Cont de curier asociat*</label>
         <select name="account_key" required>
           {% for acc in accounts %}
-            <option value="{{ acc.account_key }}" {% if acc.account_key == profile.account_key %}selected{% endif %}>
-              {{ acc.name }} ({{ acc.account_key }})
-            </option>
+          <option value="{{ acc.account_key }}" {% if acc.account_key == profile.account_key %}selected{% endif %}>
+            {{ acc.name }} ({{ acc.account_key }})
+          </option>
           {% endfor %}
         </select>
       </div>
@@ -49,7 +48,17 @@
         </div>
         <div>
           <label>Format Conținut Colet</label>
-          <input type="text" name="content_template" value="{{ profile.content_template or '' }}" maxlength="255">
+          <input type="text" name="content_template" value="{{ profile.content_template or '' }}" maxlength="100">
+        </div>
+        <div>
+          <label>Mod ambalare</label>
+          <select name="default_packing" required>
+            <option value="BOX"     {% if (profile.default_packing or '').upper() == 'BOX' %}selected{% endif %}>CUTIE DE CARTON</option>
+            <option value="PALLET"  {% if (profile.default_packing or '').upper() == 'PALLET' %}selected{% endif %}>PALET</option>
+            <option value="ENVELOPE"{% if (profile.default_packing or '').upper() == 'ENVELOPE' %}selected{% endif %}>PLIC</option>
+            <option value="BAG"     {% if (profile.default_packing or '').upper() == 'BAG' %}selected{% endif %}>SAC</option>
+            <option value="WRAP"    {% if (profile.default_packing or '').upper() == 'WRAP' %}selected{% endif %}>FOLIE</option>
+          </select>
         </div>
       </div>
     </fieldset>

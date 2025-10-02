@@ -17,7 +17,7 @@
     <article>
         <h3>Adaugă un cont/expeditor nou</h3>
         <form action="{{ url_for('create_courier_account') }}" method="post">
-            
+
             <fieldset>
                 <legend>Informații Cont</legend>
                 <div class="grid">
@@ -59,7 +59,7 @@
                 </div>
                 <label for="addressLine1">Adresă (stradă, nr., etc.)*</label>
                 <input type="text" id="addressLine1" name="address_line1" required>
-                
+
                 <div class="grid">
                     <div>
                         <label for="city">Oraș*</label>
@@ -92,7 +92,7 @@
                     <input type="password" name="econt_password" placeholder="Econt Password">
                 </div>
             </fieldset>
-            
+
             <button type="submit">Adaugă Cont</button>
         </form>
     </article>
@@ -133,12 +133,12 @@
         </tbody>
     </table>
     <hr>
-    
+
    <h2 id="profiles">📦 Profile de Expediție (Șabloane)</h2>
 <article>
     <h3>Adaugă un profil nou</h3>
     <form action="{{ url_for('create_shipment_profile') }}" method="post">
-        
+
         <div class="grid">
             <div>
                 <label for="profileName">Nume Profil*</label>
@@ -188,8 +188,23 @@
                     <input type="text" id="content_template" name="content_template" value="${orderName} / ${quantity} x ${sku}" maxlength="30">
                 </div>
             </div>
+
+            <!-- ✅ NOU: Mod ambalare salvat în profil -->
+            <div class="grid">
+                <div>
+                    <label for="default_packing">Mod ambalare</label>
+                    <select id="default_packing" name="default_packing" required>
+                        <option value="CUTIE DE CARTON">CUTIE DE CARTON</option>
+                        <option value="PALET">PALET</option>
+                        <option value="PLIC">PLIC</option>
+                        <option value="SAC">SAC</option>
+                        <option value="CUTIE">CUTIE</option>
+                        <option value="FOLIE">FOLIE</option>
+                    </select>
+                </div>
+            </div>
         </fieldset>
-        
+
         <button type="submit">Salvează Profilul</button>
     </form>
 </article>
@@ -208,6 +223,7 @@
                         <th>ID</th>
                         <th>Nume Profil</th>
                         <th>Cont Curier Asociat</th>
+                        <th>Mod ambalare</th> <!-- ✅ NOU -->
                         <th>Acțiuni</th>
                     </tr>
                 </thead>
@@ -217,6 +233,7 @@
                     <td>{{ profile.id }}</td>
                     <td>{{ profile.name }}</td>
                     <td>{{ profile.account_key }}</td>
+                    <td>{{ profile.default_packing or "-" }}</td> <!-- ✅ NOU -->
                     <td>
                     <a href="{{ url_for('edit_shipment_profile_page', profile_id=profile.id) }}" role="button" class="btn btn-sm btn-primary">
                         Editează
@@ -229,7 +246,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="4" class="text-center">Nu există profile salvate.</td>
+                    <td colspan="5" class="text-center">Nu există profile salvate.</td>
                 </tr>
                 {% endfor %}
                 </tbody>

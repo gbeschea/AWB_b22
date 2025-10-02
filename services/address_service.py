@@ -424,149 +424,88 @@ def _set_order_fields(order: Any, status: str, score: int, errors: List[str], su
 # ================== Main validate ==================
 
 async def validate_address_for_order(db: AsyncSession, order: Any) -> ValidationResult:
+    """
+    ZIP-first strict validation:
+      - ZIP is canonical (5->6 padding, must exist in DB)
+      - House number is mandatory (except easybox); FN/F.N./fara nr => invalid
+      - County/City must match ZIP owner pair in DB (suggest correction if mismatch)
+      - Numeric street names (ex. "1 Mai", "13 Septembrie", "1 Decembrie 1918") are not treated as house numbers
+      - Block metadata (Bl/Sc/Ap/Et) not considered as house number
+      - Fuzzy street suggestion within ZIP (non-blocking)
+    """
     in_judet_raw = getattr(order, "shipping_province", None) or ""
     in_city_raw  = getattr(order, "shipping_city", None) or ""
-    in_zip       = (getattr(order, "shipping_zip", None) or "").strip() or None
+    in_zip_raw   = (getattr(order, "shipping_zip", None) or "").strip()
     in_addr1     = getattr(order, "shipping_address1", None) or ""
     in_addr2     = getattr(order, "shipping_address2", None) or ""
 
     errors: List[str] = []
     suggestions: List[str] = []
-    score = 100
 
+    # 0) Easybox shortcut: valid if ZIP exists & formatted
     if detect_easybox(in_addr1, in_addr2):
-        msg = "Adresă locker (easybox/pick-up) detectată — considerată validă."
-        _set_order_fields(order, "valid", 100, [msg], [])
-        return ValidationResult(True, 100, [msg], [])
+        z6 = re.sub(r"\D", "", in_zip_raw or "").zfill(6)
+        if not re.fullmatch(r"\d{6}", z6):
+            msg = "Adresă locker detectată, dar codul poștal lipsește sau are format greșit (6 cifre)."
+            _set_order_fields(order, "invalid", 40, [msg], [])
+            return ValidationResult(False, 40, [msg], [])
+        zip_rows = await _load_by_zip(db, z6)
+        if not zip_rows:
+            msg = f"Adresă locker detectată, dar codul poștal {z6} nu există în nomenclatorul din baza de date."
+            _set_order_fields(order, "invalid", 40, [msg], [])
+            return ValidationResult(False, 40, [msg], [])
+        _set_order_fields(order, "valid", 100, ["Adresă locker (easybox/pick-up) detectată — valid."], [])
+        return ValidationResult(True, 100, ["Adresă locker (easybox/pick-up) detectată — valid."], [])
 
-    # București: sectorul face județ/localitate = București (sectorul rămâne opțional)
+    # 1) București: normalizează sectorul dacă apare textual
     in_judet, in_city, detected_sector = bucharest_fix(in_judet_raw, in_city_raw, in_addr1, in_addr2)
     if detected_sector and (norm_text(in_judet_raw) != "bucuresti" or norm_text(in_city_raw) != "bucuresti"):
         suggestions.append(f"Recomandat: Județ='București' și Localitate='București' (sector {detected_sector}).")
 
-    # SAT/comună din text
-    settlements = detect_settlements(in_addr1, in_addr2)
-    prefer_loc = None
-    sat_names = [name for kind,name in settlements if kind.startswith("sat")]
-    if sat_names: prefer_loc = sat_names[0]
-    elif settlements: prefer_loc = settlements[0][1]
-
-    # Extrage stradă/număr
+    # 2) Extrage stradă & număr (strict pe număr)
     street1 = street_core(in_addr1)
     street2 = street_core(in_addr2)
     chosen_street = street1 if len(street1) >= len(street2) else street2
-    chosen_number = _has_real_house_number(in_addr1) or _has_real_house_number(in_addr2)
 
-    # Reguli business minime
+    NO_NUM_RE = re.compile(r"\b(f\.?\s*n\.?|fara\s+nr\.?|fara\s+numar|fără\s+număr)\b", re.I)
+    if NO_NUM_RE.search(" ".join([in_addr1, in_addr2])):
+        chosen_number = None
+    else:
+        chosen_number = _has_real_house_number(in_addr1) or _has_real_house_number(in_addr2)
 
-    # Heuristic: if the "street" is actually a 6-digit number (a likely ZIP code) raise a clearer error
-    if not chosen_street:
-        for _p in (in_addr1, in_addr2):
-            tok = (str(_p or "").strip())
-            if tok and tok.isdigit() and len(tok) == 6:
-                errors.append("Câmpul stradă pare să conțină un cod poștal, nu o denumire de stradă.")
-                break
-    if not chosen_street:
-        errors.append("Strada lipsește sau nu poate fi determinată."); score -= 60
+    # 3) ZIP obligatoriu (format + existență în DB)
+    z6 = re.sub(r"\D", "", in_zip_raw or "").zfill(6)
+    if not re.fullmatch(r"\d{6}", z6):
+        errors.append("Cod poștal lipsă sau format greșit (trebuie 6 cifre).")
+
+    zip_rows = await _load_by_zip(db, z6) if not errors else []
+    if not errors and not zip_rows:
+        errors.append(f"Codul poștal {z6} nu există în nomenclatorul din baza de date.")
+
+    # 4) Numărul este obligatoriu (exceptând easybox)
     if not chosen_number:
-        errors.append("Numărul stradal lipsește din adresă."); score -= 60
-    if not in_judet:
-        errors.append("Județul lipsește din adresă."); score -= 40
-    if not in_city_raw:
-        errors.append("Localitatea lipsește din adresă."); score -= 40
-    hard_invalid = score < 60
+        errors.append("Numărul stradal lipsește din adresă (obligatoriu).")
 
-    # Candidați (J+L) și din ZIP
-    jl_rows = await _load_candidates_for_locality(db, in_judet, in_city_raw)
-    zip_rows = await _load_by_zip(db, in_zip) if (in_zip and re.fullmatch(r"\d{6}", str(in_zip))) else []
-
-    # Regula 2 din 3
-    pair_ok = {"JL": bool(jl_rows), "JZ": False, "LZ": False}
+    # 5) Validare J/L vs ZIP (ZIP-first)
     if zip_rows:
         j_owner, l_owner = _zip_owner_stats(zip_rows)
-        if j_owner and same_locality(j_owner, in_judet): pair_ok["JZ"] = True
-        if l_owner and same_locality(l_owner, in_city_raw): pair_ok["LZ"] = True
-
-    # Recomandări pe baza disonanțelor ZIP
-    if pair_ok["JL"] and not (pair_ok["JZ"] and pair_ok["LZ"]):
-        z_s = _candidate_zip_from_jl(jl_rows, in_addr1 or in_addr2, chosen_number)
-        if z_s and (not in_zip or str(in_zip) != z_s):
-            suggestions.append(f"cod_postal_sugerat={z_s}")
-        if zip_rows:
-            detail = _zip_best_match_detail(zip_rows, in_addr1 or in_addr2, chosen_number)
-            if detail:
-                errors.append(f"ZIP {in_zip} aparține de {detail}, nu de {in_judet}/{in_city_raw}.")
-    elif (pair_ok["JZ"] and not pair_ok["JL"]) or (pair_ok["LZ"] and not pair_ok["JL"]):
-        j_owner, l_owner = _zip_owner_stats(zip_rows)
-        if pair_ok["JZ"] and j_owner and (not same_locality(l_owner, in_city_raw)):
-            suggestions.append(f"Localitate sugerată din ZIP {in_zip}: '{l_owner}'.")
-        if pair_ok["LZ"] and l_owner and (not same_locality(j_owner, in_judet)):
-            suggestions.append(f"Județ sugerat din ZIP {in_zip}: '{j_owner}'.")
-        detail = _zip_best_match_detail(zip_rows, in_addr1 or in_addr2, chosen_number)
-        if detail:
-            errors.append(f"ZIP {in_zip} indică {detail}; verificați județ/localitate.")
-    elif not pair_ok["JL"] and zip_rows:
-        j_owner, l_owner = _zip_owner_stats(zip_rows)
         if j_owner and l_owner:
-            suggestions.append(f"Din ZIP {in_zip} rezultă '{j_owner}/{l_owner}' ca județ/localitate probabile.")
+            if not same_locality(j_owner, in_judet) or not same_locality(l_owner, in_city):
+                errors.append("Județ/localitate nu corespund codului poștal.")
+                suggestions.append(f"Actualizează la: {l_owner}, {j_owner} (conform ZIP).")
 
-    # SAT/comună: sugerează localitate + ZIP aferent
-    if prefer_loc and not same_locality(prefer_loc, in_city_raw):
-        suggestions.append(f"Localitate sugerată din adresă: '{prefer_loc}'.")
-        try:
-            rows = jl_rows or []
-            if not rows:
-                rows = await _load_candidates_for_locality(db, in_judet, prefer_loc)
-            if rows:
-                zips = []
-                for r in rows:
-                    if same_locality(getattr(r,"localitate",""), prefer_loc):
-                        cp = str(getattr(r,"cod_postal", getattr(r,"codpostal","")) or "").strip().zfill(6)
-                        if re.fullmatch(r"\d{6}", cp): zips.append(cp)
-                if zips:
-                    z = Counter(zips).most_common(1)[0][0]
-                    if not in_zip or str(in_zip) != z:
-                        suggestions.append(f"Cod poștal sugerat pentru '{prefer_loc}': {z}.")
-        except Exception:
-            pass
+    # 6) Sugestie de stradă (fuzzy în perimetrul ZIP) — nu blochează validarea
+    if zip_rows and chosen_street:
+        if not _rows_for_street(zip_rows, chosen_street):
+            suggestions.append("Verifică denumirea străzii (nu găsesc potrivire pentru localitatea din ZIP).")
 
-    # Standardizare stradă (preferă rândul care acoperă numărul)
-    if jl_rows:
-        best_st = None
-        best_dist = 10**9
-        for r in _rows_for_street(jl_rows, in_addr1 or in_addr2) or []:
-            tip, nume = _street_name_fields(r)
-            full_std = " ".join(x for x in [tip, nume] if x).strip()
-            iv = parse_numar_spec(getattr(r, "numar", None) or "")
-            num, suf = parse_house_number(chosen_number)
-            if interval_contains(iv, num, suf):
-                d = abs((iv.start or 0) - (num or 0)) if iv and num is not None else 10**8
-                if d < best_dist:
-                    best_dist = d; best_st = full_std or nume
-        if best_st:
-            suggestions.append(f"strada_standardizata={best_st}")
+    # Emitere rezultat
+    if errors:
+        _set_order_fields(order, "invalid", 40, errors, suggestions)
+        return ValidationResult(False, 40, errors, suggestions)
 
-    # -------------- FINAL validate_address_for_order(...) --------------
-    status = "valid"
-    if 'hard_invalid' in locals() and hard_invalid:
-        status = "invalid"
-    elif score < 60:
-        status = "invalid"
-    elif score < 85:
-        status = "partial_match"
-
-    _set_order_fields(order, status, score, errors, suggestions)
-
-    # === MODIFICAREA FINALĂ ESTE AICI ===
-    # Am adăugat 'score=score'
-    return ValidationResult(
-        is_valid=(status == "valid"),
-        score=score,
-        errors=errors or [],
-        suggestions=suggestions or []
-    )
-
-
+    _set_order_fields(order, "valid", 100, [], suggestions)
+    return ValidationResult(True, 100, [], suggestions)
 async def validate_unvalidated_orders(
     db: AsyncSession,
     days: Optional[int] = None,
