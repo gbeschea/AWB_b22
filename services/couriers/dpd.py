@@ -369,39 +369,29 @@ class DPDCourier(BaseCourier):
 
     # tracking & label (nemodificate funcțional)
     async def track_awb(self, db: AsyncSession, awb: str, account_key: Optional[str]) -> TrackingResponse:
-        acct = await self._get_account(db, account_key) if account_key else None
-        if not acct or not getattr(acct, "credentials", None):
-            return TrackingResponse(status="no-credentials", date=None)
-
-        creds = acct.credentials
-        url = f"{DPD_BASE_URL}/track/"
-        body = {
-            "userName": creds.get("username"),
-            "password": creds.get("password"),
-            "language": "EN",
-            "parcels": [{"id": awb}],
-        }
+        if not account_key:
+            return TrackingResponse(status="error", date=datetime.now(), raw_data={"error": "Account key is missing for DPD tracking."})
+        
+        creds = await self.get_credentials(db, account_key)
+        
+        url = f"{DPD_BASE_URL}/tracking/{awb}"
+        # Presupunem că DPD folosește user/parolă pentru a obține un token, sau un token direct
+        # Acest cod presupune un token direct in credentials
+        headers = {"Authorization": f"Bearer {creds.get('token')}"}
         try:
-            r = await self.client.post(url, json=body, headers={"Accept": "application/json"}, timeout=20.0, follow_redirects=False)
-            if r.status_code != 200:
-                logging.warning("DPD HTTP %s la tracking pentru %s", r.status_code, awb)
-                return TrackingResponse(status=f"HTTP {r.status_code}", date=None)
-            data = r.json()
-            parcels = data.get("parcels") or []
-            events = parcels[0].get("events") if parcels else []
-            last_ev = events[0] if events else {}
-            status = last_ev.get("name") or last_ev.get("status") or "Unknown"
-            date_str = last_ev.get("date") or last_ev.get("datetime")
-            dt = None
-            if date_str:
-                try:
-                    dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                except Exception:
-                    dt = None
+            res = await self.client.get(url, headers=headers)
+            if res.status_code == 404:
+                return TrackingResponse(status="not found", date=datetime.now(), raw_data=None)
+            res.raise_for_status()
+            data = res.json()
+            status = data.get("status", {}).get("status")
+            dt_str = data.get("status", {}).get("timestamp")
+            dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00")) if dt_str else None
             return TrackingResponse(status=status, date=dt, raw_data=data)
         except Exception as e:
-            logging.error("Excepție tracking DPD %s: %s", awb, e)
-            return TrackingResponse(status="tracking-error", date=None)
+            log.error("Excepție tracking DPD %s: %s", awb, e)
+            return TrackingResponse(status="tracking-error", date=None, raw_data=None)
+
 
     async def get_label(self, awb: str, creds: dict, paper_size: str) -> bytes:
         size = "A6" if (paper_size or "A6").upper() == "A6" else "A4"

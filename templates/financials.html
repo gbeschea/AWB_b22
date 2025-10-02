@@ -1,0 +1,110 @@
+{% extends "_layout.html" %}
+
+{% block content %}
+<div class="container-fluid">
+    <h1 class="h3 mb-2 text-gray-800">Gestiune Financiară</h1>
+    <p class="mb-4">Sincronizați și gestionați statusul plăților pentru comenzile ramburs.</p>
+
+    <div class="card shadow mb-4">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">Panou de Control</h6>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-5">
+                    <label>Sincronizează comenzi între:</label>
+                    <div class="input-group">
+                        <input type="date" id="startDate" class="form-control">
+                        <input type="date" id="endDate" class="form-control">
+                    </div>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button id="syncButton" class="btn btn-primary btn-block">
+                        <i class="fas fa-sync-alt"></i> Sincronizează
+                    </button>
+                </div>
+                <div class="col-md-3 d-flex align-items-end ml-auto">
+                    <button id="markAsPaidButton" class="btn btn-success btn-block">
+                        <i class="fas fa-check-circle"></i> Marchează ca Plătit (Ramburs)
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card shadow mb-4">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">Comenzi de Procesat</h6>
+        </div>
+        <div class="card-body">
+            <div class="row mb-3">
+                <div class="col-md-4">
+                    <label for="courierFilter">Filtrează după Curier:</label>
+                    <select id="courierFilter" class="form-control">
+                        <option value="">Toți Curierii</option>
+                        {% for courier in couriers %}
+                        <option value="{{ courier }}">{{ courier }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label for="statusFilter">Filtrează după Status Curier:</label>
+                    <input type="text" id="statusFilter" class="form-control" placeholder="ex: Livrat, În tranzit...">
+                </div>
+            </div>
+
+            <div class="table-responsive">
+                <table class="table table-bordered" id="ordersTable" width="100%" cellspacing="0">
+                    <thead>
+                        <tr>
+                            <th><input type="checkbox" id="selectAll"></th>
+                            <th>Comandă</th>
+                            <th>Client</th>
+                            <th>Dată</th>
+                            <th>Status Plată</th>
+                            <th>Curier</th>
+                            <th>Status Brut Curier</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for order in orders %}
+                        <tr data-order-id="{{ order.id }}">
+                            <td><input type="checkbox" class="order-checkbox" value="{{ order.id }}"></td>
+                            <td>{{ order.name }}</td>
+                            <td>{{ order.customer }}</td>
+                            <td>{{ order.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                            <td>
+                                <span class="badge badge-pill 
+                                    {% if order.financial_status == 'paid' %}badge-success
+                                    {% elif order.financial_status == 'pending' %}badge-warning
+                                    {% else %}badge-secondary{% endif %}">
+                                    {{ order.financial_status }}
+                                </span>
+                            </td>
+                            <td>
+                                {% if order.shipments %}
+                                    {{ order.shipments[0].courier }}
+                                {% else %}
+                                    -
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if order.shipments %}
+                                    {{ order.shipments[0].last_status }}
+                                {% else %}
+                                    -
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/financials.js"></script>
+{% endblock %}

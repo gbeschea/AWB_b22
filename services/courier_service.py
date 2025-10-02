@@ -2,164 +2,76 @@
 
 import asyncio
 import logging
-from sqlalchemy import select
+from collections import defaultdict
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
+from typing import List
+from datetime import datetime, timedelta, timezone
+
 import models
 from services.couriers import get_courier_service
 
-# --- AICI ESTE CORECȚIA FINALĂ ---
-# Am scos importul greșit și am lăsat fișierul curat,
-# deoarece funcțiile de aici nu depind direct de 'base.py'.
-# Dependența este în sub-module (dpd.py, sameday.py), unde este deja corectă.
-
+logger = logging.getLogger(__name__)
 
 def get_courier_service_by_name(courier_name: str):
-    """
-    Wrapper peste funcția din `services/couriers` pentru a oferi un
-    punct de acces consistent.
-    """
     service = get_courier_service(courier_name)
     if not service:
         raise ValueError(f"Niciun serviciu de curierat găsit pentru numele: {courier_name}")
     return service
 
+async def track_and_update_shipments(db: AsyncSession, full_sync: bool = False, days_ago: int = 14):
+    logger.info("--- COURIER SYNC A PORNIT ---")
+    final_statuses = ['delivered', 'refused', 'returned', 'canceled', 'livrat', 'refuzat', 'returnat', 'anulat', 'unknown', 'not found', 'error', 'tracking-error']
+    since_date = datetime.now(timezone.utc) - timedelta(days=days_ago)
 
-async def track_and_update_shipments(db: AsyncSession, full_sync: bool = False):
-    logging.warning("--- COURIER SYNC A PORNIT ---")
-    
-    final_statuses = ['Livrat', 'Refuzat', 'Returnat']
-    stmt = select(models.Shipment).options(
-        joinedload(models.Shipment.order)
-    ).where(models.Shipment.last_status.is_(None) | ~models.Shipment.last_status.in_(final_statuses))
+    stmt = select(models.Shipment).where(
+        models.Shipment.fulfillment_created_at >= since_date,
+        models.Shipment.awb.isnot(None),
+        models.Shipment.last_status.is_(None) | ~func.lower(models.Shipment.last_status).in_(final_statuses)
+    )
     
     result = await db.execute(stmt)
-    shipments_to_track = result.scalars().unique().all()
+    shipments_to_track = result.scalars().all()
 
     if not shipments_to_track:
-        logging.warning("COURIER SYNC: Nu s-au găsit livrări care necesită actualizare.")
+        logger.info("COURIER SYNC: Nu există livrări de urmărit.")
         return
 
-    total_count = len(shipments_to_track)
-    logging.warning(f"COURIER SYNC: S-au găsit {total_count} livrări pentru verificare.")
+    logger.info(f"COURIER SYNC: S-au găsit {len(shipments_to_track)} livrări de urmărit.")
 
-    processed_count = 0
+    grouped_shipments = defaultdict(list)
+    for s in shipments_to_track:
+        if s.courier and s.account_key and s.awb:
+            grouped_shipments[(s.courier, s.account_key)].append(s)
+
     updated_count = 0
     
-    semaphore = asyncio.Semaphore(1)
+    for (courier_name, account_key), shipments_group in grouped_shipments.items():
+        try:
+            courier_service_instance = get_courier_service(courier_name)
+            if not courier_service_instance:
+                logger.warning(f"Nu s-a găsit serviciu pentru curierul '{courier_name}' (cont: {account_key})")
+                continue
 
-    async def process_shipment(shipment: models.Shipment):
-        nonlocal processed_count, updated_count
-        
-        async with semaphore:
-            try:
-                courier_service = get_courier_service(shipment.courier)
-                if not courier_service:
-                    logging.warning(f"   -> Nu s-a găsit serviciu pentru curierul '{shipment.courier}' (AWB: {shipment.awb})")
-                    return
-
-                response = await courier_service.track_awb(db, shipment.awb, shipment.account_key)
+            logger.info(f"Procesare {len(shipments_group)} AWB-uri pentru {courier_name} (cont: {account_key})...")
+            
+            for shipment in shipments_group:
+                response = await courier_service_instance.track_awb(db, shipment.awb, shipment.account_key)
                 
-                processed_count += 1
-                if processed_count % 20 == 0 or processed_count == total_count:
-                    logging.warning(f"   -> Procesat {processed_count}/{total_count} AWB-uri...")
-
                 if response and response.status and response.status != shipment.last_status:
+                    logger.info(f"Status nou pentru AWB {shipment.awb} ({courier_name}): '{shipment.last_status}' -> '{response.status}'")
                     shipment.last_status = response.status
                     shipment.last_status_at = response.date
                     updated_count += 1
-            except Exception as e:
-                logging.error(f"Eroare la procesarea AWB {shipment.awb}: {e}", exc_info=True)
+                await asyncio.sleep(0.3) 
 
-    tasks = [process_shipment(s) for s in shipments_to_track]
-    await asyncio.gather(*tasks)
-
-    if updated_count > 0:
-        logging.warning(f"COURIER SYNC: Se salvează {updated_count} statusuri noi în baza de date...")
-        await db.commit()
-    else:
-        logging.warning("COURIER SYNC: Nu a fost găsit niciun status nou de actualizat.")
-
-    logging.warning(f"--- COURIER SYNC FINALIZAT ---")# /services/courier_service.py
-
-import asyncio
-import logging
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
-import models
-from services.couriers import get_courier_service
-
-# --- AICI ESTE CORECȚIA FINALĂ ---
-# Am scos importul greșit și am lăsat fișierul curat,
-# deoarece funcțiile de aici nu depind direct de 'base.py'.
-# Dependența este în sub-module (dpd.py, sameday.py), unde este deja corectă.
-
-
-def get_courier_service_by_name(courier_name: str):
-    """
-    Wrapper peste funcția din `services/couriers` pentru a oferi un
-    punct de acces consistent.
-    """
-    service = get_courier_service(courier_name)
-    if not service:
-        raise ValueError(f"Niciun serviciu de curierat găsit pentru numele: {courier_name}")
-    return service
-
-
-async def track_and_update_shipments(db: AsyncSession, full_sync: bool = False):
-    logging.warning("--- COURIER SYNC A PORNIT ---")
-    
-    final_statuses = ['Livrat', 'Refuzat', 'Returnat']
-    stmt = select(models.Shipment).options(
-        joinedload(models.Shipment.order)
-    ).where(models.Shipment.last_status.is_(None) | ~models.Shipment.last_status.in_(final_statuses))
-    
-    result = await db.execute(stmt)
-    shipments_to_track = result.scalars().unique().all()
-
-    if not shipments_to_track:
-        logging.warning("COURIER SYNC: Nu s-au găsit livrări care necesită actualizare.")
-        return
-
-    total_count = len(shipments_to_track)
-    logging.warning(f"COURIER SYNC: S-au găsit {total_count} livrări pentru verificare.")
-
-    processed_count = 0
-    updated_count = 0
-    
-    semaphore = asyncio.Semaphore(1)
-
-    async def process_shipment(shipment: models.Shipment):
-        nonlocal processed_count, updated_count
-        
-        async with semaphore:
-            try:
-                courier_service = get_courier_service(shipment.courier)
-                if not courier_service:
-                    logging.warning(f"   -> Nu s-a găsit serviciu pentru curierul '{shipment.courier}' (AWB: {shipment.awb})")
-                    return
-
-                response = await courier_service.track_awb(db, shipment.awb, shipment.account_key)
-                
-                processed_count += 1
-                if processed_count % 20 == 0 or processed_count == total_count:
-                    logging.warning(f"   -> Procesat {processed_count}/{total_count} AWB-uri...")
-
-                if response and response.status and response.status != shipment.last_status:
-                    shipment.last_status = response.status
-                    shipment.last_status_at = response.date
-                    updated_count += 1
-            except Exception as e:
-                logging.error(f"Eroare la procesarea AWB {shipment.awb}: {e}", exc_info=True)
-
-    tasks = [process_shipment(s) for s in shipments_to_track]
-    await asyncio.gather(*tasks)
+        except Exception as e:
+            logger.error(f"Eroare la procesarea grupului pentru {courier_name} / {account_key}: {e}", exc_info=True)
 
     if updated_count > 0:
-        logging.warning(f"COURIER SYNC: Se salvează {updated_count} statusuri noi în baza de date...")
+        logger.info(f"COURIER SYNC: Se salvează {updated_count} statusuri noi în baza de date...")
         await db.commit()
     else:
-        logging.warning("COURIER SYNC: Nu a fost găsit niciun status nou de actualizat.")
+        logger.info("COURIER SYNC: Nu a fost găsit niciun status nou de actualizat.")
 
-    logging.warning(f"--- COURIER SYNC FINALIZAT ---")
+    logger.info("--- COURIER SYNC FINALIZAT ---")

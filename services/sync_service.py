@@ -3,30 +3,23 @@
 import asyncio
 import logging
 import json
-from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime, timezone, timedelta
+from typing import Optional, List, Dict, Any
 
-from sqlalchemy.orm import joinedload
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from dateutil.parser import parse as parse_datetime
 
 import models
 from settings import settings
-from services import shopify_service, address_service
-from services.courier_service import track_and_update_shipments as track_couriers
+from services import shopify_service, address_service, courier_service
 from websocket_manager import manager
 from database import AsyncSessionLocal
-from services.utils import calculate_and_set_derived_status
-from schemas import ValidationResult
-from services import courier_service
-import logging
+
 logger = logging.getLogger(__name__)
-from models import Order, Store, Shipment
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-
-
+from models import Order, Store
 
 
 def _dt(v: Optional[str]) -> Optional[datetime]:
@@ -39,223 +32,149 @@ def _dt(v: Optional[str]) -> Optional[datetime]:
 def map_payment_method(gateways: List[str], financial_status: str) -> str:
     raw_gateways = gateways or []
     lower_gateways_set = {g.lower().strip() for g in raw_gateways}
-    gateway_str_joined = ", ".join(raw_gateways).lower()
-
+    
     if settings.PAYMENT_MAP:
         for standard_name, keywords in settings.PAYMENT_MAP.items():
             if not lower_gateways_set.isdisjoint(keywords):
                 return standard_name
-            if any(keyword in gateway_str_joined for keyword in keywords):
-                return standard_name
 
-    if not gateway_str_joined.strip():
-        if financial_status == 'paid': return "Fara plata"
-        if financial_status == 'pending': return "Ramburs"
+    if financial_status.lower() == 'paid': return 'card'
+    return 'unknown'
 
-    return ", ".join(raw_gateways)
-
-async def courier_from_shopify(db: AsyncSession, tracking_company: str) -> Tuple[Optional[str], Optional[str]]:
-    search_text = (tracking_company or '').strip()
-    if not search_text:
-        return None, None
-
-    stmt = (
-        select(models.CourierMapping)
-        .options(joinedload(models.CourierMapping.account))
-        .where(func.lower(models.CourierMapping.shopify_name) == search_text.lower())
-    )
-    result = await db.execute(stmt)
-    mapping = result.scalars().first()
-
-    if mapping and mapping.account and mapping.account.is_active:
-        logging.info(f"Mapare găsită pentru '{search_text}'. Folosim contul: {mapping.account.account_key} ({mapping.account.courier_type})")
-        return mapping.account.courier_type, mapping.account.account_key
-
-    logging.warning(f"Nu s-a găsit nicio mapare exactă și activă pentru curierul: '{search_text}'")
-    return None, None
-
-def _get_mapped_address(order_data: Dict[str, Any], pii_source: str) -> Dict[str, Any]:
-    address = {}
-    if pii_source == 'shopify':
-        source = order_data.get('shippingAddress')
-        if not source: return address
-        first_name, last_name = source.get('firstName', ''), source.get('lastName', '')
-        address = {
-            'name': f"{first_name} {last_name}".strip(), 'address1': source.get('address1'),
-            'address2': source.get('address2'), 'phone': source.get('phone'),
-            'city': source.get('city'), 'zip': source.get('zip'), 'province': source.get('province'),
-            'country': source.get('country'), 'email': order_data.get('email')
-        }
-    elif pii_source == 'metafield':
-        source_node = order_data.get('metafield')
-        if not source_node or not source_node.get('value'): return address
-        try:
-            metafield_data = json.loads(source_node['value'])
-            address = {
-                'name': f"{metafield_data.get('first_name', '')} {metafield_data.get('last_name', '')}".strip(),
-                'address1': metafield_data.get('address1'), 'address2': metafield_data.get('address2'),
-                'phone': metafield_data.get('phone_number'), 'city': metafield_data.get('city'),
-                'zip': metafield_data.get('postal_code'), 'province': metafield_data.get('county'),
-                'country': metafield_data.get('country'), 'email': metafield_data.get('email')
+async def _process_and_insert_orders_in_batches(db: AsyncSession, orders_data: List[Dict[str, Any]], store_id: int, pii_source: str):
+    BATCH_SIZE = 200
+    total_processed = 0
+    for i in range(0, len(orders_data), BATCH_SIZE):
+        batch_data = orders_data[i:i + BATCH_SIZE]
+        logger.info(f"Procesare lot de {len(batch_data)} comenzi (de la comanda #{i+1})...")
+        orders_to_insert = []
+        for order_data in batch_data:
+            shopify_id_str = order_data['id'].split('/')[-1]
+            customer_info = order_data.get('customer')
+            customer_name = f"{customer_info['firstName'] or ''} {customer_info['lastName'] or ''}".strip() if customer_info else 'N/A'
+            shipping_address = order_data.get('shippingAddress') or {}
+            payment_gateways = order_data.get('paymentGatewayNames', [])
+            financial_status = order_data.get('displayFinancialStatus', '')
+            order_payload = {
+                'store_id': store_id,
+                'shopify_order_id': shopify_id_str,
+                'name': order_data.get('name', f"#{shopify_id_str}"),
+                'created_at': _dt(order_data.get('createdAt')),
+                'financial_status': financial_status,
+                'total_price': float(order_data['totalPriceSet']['shopMoney']['amount']) if order_data.get('totalPriceSet') else None,
+                'payment_gateway_names': ", ".join(payment_gateways),
+                'mapped_payment': map_payment_method(payment_gateways, financial_status),
+                'tags': ", ".join(order_data.get('tags', [])),
+                'note': order_data.get('note'),
+                'sync_status': 'synced',
+                'last_sync_at': datetime.now(timezone.utc),
+                'shopify_status': order_data.get('displayFulfillmentStatus', '').lower(),
             }
-        except json.JSONDecodeError:
-            logging.warning(f"Nu s-a putut decoda metafield-ul PII pentru comanda {order_data.get('name')}")
-    return address
-
+            if pii_source == 'shopify':
+                order_payload.update({
+                    'customer': customer_name,
+                    'shipping_name': f"{shipping_address.get('firstName') or ''} {shipping_address.get('lastName') or ''}".strip(),
+                    'shipping_address1': shipping_address.get('address1'),
+                    'shipping_address2': shipping_address.get('address2'),
+                    'shipping_phone': shipping_address.get('phone'),
+                    'shipping_city': shipping_address.get('city'),
+                    'shipping_zip': shipping_address.get('zip'),
+                    'shipping_province': shipping_address.get('province'),
+                    'shipping_country': shipping_address.get('country'),
+                })
+            orders_to_insert.append(order_payload)
+        if not orders_to_insert:
+            continue
+        stmt = pg_insert(models.Order).values(orders_to_insert)
+        update_dict = {c.name: c for c in stmt.excluded if c.name not in ['id', 'shopify_order_id', 'store_id']}
+        stmt = stmt.on_conflict_do_update(index_elements=['shopify_order_id'], set_=update_dict).returning(models.Order.id, models.Order.shopify_order_id)
+        result = await db.execute(stmt)
+        order_id_map = {shopify_id: internal_id for internal_id, shopify_id in result.fetchall()}
+        shipments_to_insert = []
+        for order_data in batch_data:
+            shopify_order_id = order_data['id'].split('/')[-1]
+            internal_order_id = order_id_map.get(shopify_order_id)
+            if not internal_order_id:
+                continue
+            for fulfillment in order_data.get('fulfillments', []):
+                tracking_info = fulfillment.get('trackingInfo', [{}])[0]
+                if not tracking_info.get('number'):
+                    continue
+                shipment_payload = {
+                    'order_id': internal_order_id,
+                    'shopify_fulfillment_id': fulfillment['id'].split('/')[-1],
+                    'fulfillment_created_at': _dt(fulfillment.get('createdAt')),
+                    'awb': tracking_info.get('number'),
+                    'courier': tracking_info.get('company', 'Unknown').strip(),
+                    'last_status': fulfillment.get('displayStatus'),
+                    'account_key': (tracking_info.get('company') or 'default').lower().replace(' ', '')
+                }
+                shipments_to_insert.append(shipment_payload)
+        if shipments_to_insert:
+            shipment_stmt = pg_insert(models.Shipment).values(shipments_to_insert)
+            shipment_update_dict = {c.name: c for c in shipment_stmt.excluded if c.name not in ['id', 'shopify_fulfillment_id']}
+            shipment_stmt = shipment_stmt.on_conflict_do_update(index_elements=['shopify_fulfillment_id'], set_=shipment_update_dict)
+            await db.execute(shipment_stmt)
+        if pii_source == 'shopify':
+            for order_id in order_id_map.values():
+                order = await db.get(models.Order, order_id)
+                if order and order.address_status != 'validat':
+                    await address_service.validate_address_for_order(db, order)
+        await db.commit()
+        total_processed += len(orders_to_insert)
+        logger.info(f"Lotul a fost salvat. Total procesate până acum: {total_processed}")
+    return total_processed
 
 async def run_orders_sync(db: AsyncSession, days: int, full_sync: bool = False):
+    logger.info("Începe sincronizarea comenzilor...")
+    await manager.broadcast(json.dumps({"event": "sync:start", "data": {"type": "orders"}}))
+    total_synced_count = 0
     start_ts = datetime.now(timezone.utc)
-    sync_type = "TOTALĂ" if full_sync else "STANDARD"
-    logging.warning(f"ORDER SYNC ({sync_type}) a pornit pentru ultimele {days} zile.")
-    await manager.broadcast({"type": "sync_start", "message": f"Sincronizare comenzi ({sync_type})...", "sync_type": "orders"})
+    active_stores_q = await db.execute(select(Store).where(Store.is_active == True))
+    active_stores = active_stores_q.scalars().all()
+    for store in active_stores:
+        logger.info(f"Procesare magazin: {store.name}")
+        await manager.broadcast(json.dumps({"event": "sync:progress", "data": {"store": store.name, "status": "fetching"}}))
+        created_at_min = datetime.now(timezone.utc) - timedelta(days=days)
+        created_at_max = datetime.now(timezone.utc)
+        orders_data = await shopify_service.fetch_orders(db, store.id, created_at_min, created_at_max)
+        await manager.broadcast(json.dumps({"event": "sync:progress", "data": {"store": store.name, "status": "processing", "count": len(orders_data)}}))
+        processed_count = await _process_and_insert_orders_in_batches(db, orders_data, store.id, store.pii_source)
+        total_synced_count += processed_count
+        store.last_sync_at = datetime.now(timezone.utc)
+        db.add(store)
+        await db.commit()
+    await manager.broadcast(json.dumps({"event": "sync:finish", "data": {"type": "orders", "total": total_synced_count}}))
+    logger.info(f"Sincronizare comenzi finalizată. Total procesate: {total_synced_count} în {(datetime.now(timezone.utc) - start_ts).total_seconds():.1f}s.")
 
-    stores_res = await db.execute(select(models.Store).where(models.Store.is_active == True))
-    stores_to_sync = stores_res.scalars().all()
-
-    if not stores_to_sync:
-        logging.warning("ORDER SYNC: Nu există magazine active. Sincronizarea a fost oprită.")
-        await manager.broadcast({"type": "sync_end", "message": "Nu sunt magazine active."})
-        return
-    
-    fetch_tasks = [shopify_service.fetch_orders(s, since_days=days) for s in stores_to_sync]
-    all_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-
-    total_orders_to_process = sum(len(res) for res in all_results if isinstance(res, list))
-    logging.info(f"Total comenzi de procesat: {total_orders_to_process}")
-    await manager.broadcast({"type": "progress_update", "current": 0, "total": total_orders_to_process, "message": f"S-au găsit {total_orders_to_process} comenzi. Se procesează..."})
-
-    processed_count = 0
-    all_processed_order_ids = set()
-
-    for store_rec, orders_or_exception in zip(stores_to_sync, all_results):
-        if isinstance(orders_or_exception, Exception):
-            logging.error(f"Eroare la preluarea comenzilor pentru {store_rec.domain}: {orders_or_exception}")
-            continue
-
-        for o in orders_or_exception:
-            processed_count += 1
-            order_name_log = o.get('name', 'N/A')
-            
-            # --- MODIFICARE AICI: Log-uri detaliate in terminal ---
-            print(f"[{processed_count}/{total_orders_to_process}] Procesez comanda: {order_name_log}...")
-
-            sid = o['id']
-
-            order_res = await db.execute(
-                select(models.Order)
-                .options(joinedload(models.Order.line_items), joinedload(models.Order.shipments), joinedload(models.Order.fulfillment_orders))
-                .where(models.Order.shopify_order_id == sid)
-            )
-            order = order_res.unique().scalar_one_or_none()
-
-            shipping_address = _get_mapped_address(o, store_rec.pii_source)
-            if not shipping_address:
-                 logging.warning(f"  -> ATENȚIE: Nu s-au găsit date PII pentru comanda {order_name_log} din sursa '{store_rec.pii_source}'")
-
-            gateways, financial_status = o.get('paymentGatewayNames', []), o.get('displayFinancialStatus', 'unknown')
-            mapped_payment = map_payment_method(gateways, financial_status)
-            total_price_str = o.get('totalPriceSet', {}).get('shopMoney', {}).get('amount', '0.0')
-            status_from_shopify = (o.get('displayFulfillmentStatus') or 'unfulfilled').strip().lower()
-            if status_from_shopify == 'success': status_from_shopify = 'fulfilled'
-            fulfillment_orders = o.get('fulfillmentOrders', {}).get('edges', [])
-            has_active_hold = any(ff_edge.get('node', {}).get('fulfillmentHolds') for ff_edge in fulfillment_orders)
-
-            order_data = {
-                'name': o.get('name'), 'customer': shipping_address.get('name') or 'N/A',
-                'created_at': _dt(o.get('createdAt')), 'cancelled_at': _dt(o.get('cancelledAt')),
-                'is_on_hold_shopify': has_active_hold, 'financial_status': financial_status,
-                'total_price': float(total_price_str) if total_price_str else 0.0,
-                'payment_gateway_names': ", ".join(gateways), 'mapped_payment': mapped_payment,
-                'tags': ",".join(o.get('tags', [])), 'note': o.get('note', ''),
-                'shopify_status': status_from_shopify,
-                'shipping_name': shipping_address.get('name'), 'shipping_address1': shipping_address.get('address1'),
-                'shipping_address2': shipping_address.get('address2'), 'shipping_phone': shipping_address.get('phone'),
-                'shipping_city': shipping_address.get('city'), 'shipping_zip': shipping_address.get('zip'),
-                'shipping_province': shipping_address.get('province'), 'shipping_country': shipping_address.get('country'),
-            }
-
-            if not order:
-                order = models.Order(store_id=store_rec.id, shopify_order_id=sid, **order_data)
-                db.add(order)
-            else:
-                for key, value in order_data.items():
-                    setattr(order, key, value)
-            
-            if order.line_items:
-                for item in order.line_items:
-                    await db.delete(item)
-                await db.flush()
-            
-            line_items_data = o.get('lineItems', {}).get('edges', [])
-            for item_edge in line_items_data:
-                item_node = item_edge.get('node', {})
-                new_line_item = models.LineItem(
-                    sku=item_node.get('sku'),
-                    title=item_node.get('title'),
-                    quantity=item_node.get('quantity')
-                )
-                order.line_items.append(new_line_item)
-
-            fulfillments_data = o.get('fulfillments', [])
-            if fulfillments_data:
-                existing_fulfillment_ids = {str(s.shopify_fulfillment_id) for s in order.shipments if s.shopify_fulfillment_id}
-                for fulfillment in fulfillments_data:
-                    fulfillment_id = str(fulfillment.get('id'))
-                    if fulfillment_id and fulfillment_id not in existing_fulfillment_ids:
-                        tracking_info_list = fulfillment.get('trackingInfo', [])
-                        tracking_info = tracking_info_list[0] if tracking_info_list else {}
-                        
-                        courier_type, account_key = await courier_from_shopify(db, tracking_info.get('company'))
-                        
-                        if tracking_info.get('number'):
-                            logging.info(f"  -> Livrare nouă găsită pentru comanda {order.name}: AWB {tracking_info.get('number')}")
-                        
-                        new_shipment = models.Shipment(
-                            order_id=order.id,
-                            shopify_fulfillment_id=fulfillment_id,
-                            awb=tracking_info.get('number'),
-                            courier=courier_type,
-                            account_key=account_key,
-                            fulfillment_created_at=_dt(fulfillment.get('createdAt'))
-                        )
-                        db.add(new_shipment)
-
-            all_processed_order_ids.add(order.id)
-            if processed_count % 50 == 0:
-                await manager.broadcast({"type": "progress_update", "current": processed_count, "total": total_orders_to_process, "message": f"Se procesează... ({processed_count}/{total_orders_to_process})"})
-
-    await db.commit()
-
-    if all_processed_order_ids:
-        logging.warning(f"Validare adrese și recalculare statusuri pentru {len(all_processed_order_ids)} comenzi...")
-        
-        async with AsyncSessionLocal() as session:
-            orders_to_recalc_res = await session.execute(
-                select(models.Order).options(joinedload(models.Order.shipments)).where(models.Order.id.in_(all_processed_order_ids))
-            )
-            orders_to_process = orders_to_recalc_res.unique().scalars().all()
-            
-            total_to_validate = len(orders_to_process)
-            validated_count = 0
-            
-            # --- MODIFICARE AICI: Log-uri pentru validare ---
-            print(f"Începe validarea adreselor pentru {total_to_validate} comenzi...")
-            for order in orders_to_process:
-                validated_count += 1
-                if validated_count % 20 == 0:
-                    print(f"  -> Validat {validated_count}/{total_to_validate}...")
-
-                if order.address_status == 'nevalidat':
-                    await address_service.validate_address_for_order(session, order)
-                
-                calculate_and_set_derived_status(order)
-            
-            print(f"  -> Validare finalizată. Se salvează în baza de date...")
-            await session.commit()
-    
-    await manager.broadcast({"type": "sync_end", "message": f"Sincronizare finalizată! {processed_count} comenzi actualizate."})
-    logging.warning(f"ORDER SYNC finalizat în {(datetime.now(timezone.utc) - start_ts).total_seconds():.1f}s.")
-
+async def sync_orders_for_stores(store_ids: List[int], created_at_min: datetime, created_at_max: datetime):
+    logger.info(f"Începe sincronizarea comenzilor pentru magazinele: {store_ids}...")
+    logger.info(f"Interval de date: {created_at_min.strftime('%Y-%m-%d')} -> {created_at_max.strftime('%Y-%m-%d')}")
+    total_synced_count = 0
+    start_ts = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as db:
+        for store_id in store_ids:
+            logger.info(f"Procesare magazin ID: {store_id}")
+            try:
+                store = await db.get(Store, store_id)
+                if not store:
+                    logger.warning(f"Magazinul cu ID-ul {store_id} nu a fost găsit. Se omite.")
+                    continue
+                orders_data = await shopify_service.fetch_orders(db, store.id, created_at_min, created_at_max)
+                if orders_data:
+                    logger.info(f"S-au preluat {len(orders_data)} comenzi de la Shopify pentru magazinul {store.name}.")
+                    processed_count = await _process_and_insert_orders_in_batches(db, orders_data, store.id, store.pii_source)
+                    total_synced_count += processed_count
+                    logger.info(f"S-au procesat și salvat {processed_count} comenzi pentru magazinul {store.name}.")
+                else:
+                    logger.info(f"Nu s-au găsit comenzi noi în intervalul specificat pentru magazinul {store.name}.")
+                store.last_sync_at = datetime.now(timezone.utc)
+                db.add(store)
+                await db.commit()
+            except Exception as e:
+                logger.error(f"Eroare la sincronizarea magazinului {store_id}: {e}", exc_info=True)
+    end_ts = datetime.now(timezone.utc)
+    logger.info(f"Sincronizare finalizată. Total comenzi procesate: {total_synced_count} în {(end_ts - start_ts).total_seconds():.2f} secunde.")
 
 async def run_couriers_sync(db: AsyncSession, full_sync: bool = False):
     await courier_service.track_and_update_shipments(db, full_sync=full_sync)
@@ -264,32 +183,20 @@ async def run_full_sync(db: AsyncSession, days: int):
     await run_orders_sync(db, days, full_sync=True)
     await run_couriers_sync(db, full_sync=True)
 
-# === AICI ESTE MODIFICAREA ===
 async def run_address_validation_for_all_orders(db: AsyncSession):
-    """
-    Rulează validarea adreselor pentru TOATE comenzile din baza de date,
-    cu salvare periodică a progresului.
-    """
     logger.info("Începe validarea adreselor pentru toate comenzile...")
-    
     stmt = select(Order)
     result = await db.execute(stmt)
     all_orders = result.scalars().all()
-    
     total = len(all_orders)
     logger.info(f"S-au găsit {total} comenzi pentru validare.")
-    
     for i, order in enumerate(all_orders):
         try:
             await address_service.validate_address_for_order(db, order)
         except Exception as e:
             logger.error(f"Eroare la validarea comenzii {order.name}: {e}")
-
-        # La fiecare 100 de comenzi, salvăm în baza de date și afișăm progresul
         if (i + 1) % 100 == 0:
             await db.commit()
-            logger.info(f"  -> Validat și salvat {i + 1}/{total}...")
-
-    # Asigură-te că se salvează și restul de comenzi la final
+            logger.info(f"Progres validare: {i + 1} / {total}")
     await db.commit()
-    logger.info(f"VALIDAREA ADRESELOR a fost finalizată pentru {total} comenzi.")
+    logger.info("Validarea adreselor pentru toate comenzile a fost finalizată.")
