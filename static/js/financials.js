@@ -1,123 +1,219 @@
-// static/js/financials.js
+// static/financials.js
 
-document.addEventListener('DOMContentLoaded', function() {
-    const syncButton = document.getElementById('syncButton');
-    const markAsPaidButton = document.getElementById('markAsPaidButton');
-    const selectAllCheckbox = document.getElementById('selectAll');
-    const orderCheckboxes = document.querySelectorAll('.order-checkbox');
-    const courierFilter = document.getElementById('courierFilter');
-    const statusFilter = document.getElementById('statusFilter');
-    const ordersTable = document.getElementById('ordersTable').getElementsByTagName('tbody')[0];
+(() => {
+  const qs = (sel) => document.querySelector(sel);
+  const qsa = (sel) => Array.from(document.querySelectorAll(sel));
 
-    // Funcție pentru a afișa o notificare (folosind un simplu alert)
-    function showNotification(message, type = 'info') {
-        alert(`[${type.toUpperCase()}] ${message}`);
+  // Elemente
+  const storeSelect = qs("#storeSelect");
+  const statusSelect = qs("#statusSelect");          // <select multiple> populat de backend
+  const startInput  = qs("#startDate");
+  const endInput    = qs("#endDate");
+  const sortSelect  = qs("#sortSelect");
+  const syncBtn     = qs("#syncBtn");
+  const clearBtn    = qs("#clearViewBtn");
+  const tableBody   = qs("#ordersTable tbody");
+  const emptyState  = qs("#emptyState");             // un <div> cu mesaj "Nu sunt date"
+  const countBadge  = qs("#rowsCount");
+  const loadingBar  = qs("#loadingBar");             // o bară / spinner simplu
+
+  const CLEARED_KEY = "financialsCleared";
+
+  // Utils
+  const show = (el) => el && (el.style.display = "");
+  const hide = (el) => el && (el.style.display = "none");
+  const enable = (el) => el && (el.disabled = false);
+  const disable = (el) => el && (el.disabled = true);
+
+  function getSelectedStatuses() {
+    return qsa("#statusSelect option:checked").map(o => o.value);
+  }
+
+  function getStoreParam() {
+    const v = storeSelect?.value ?? "all";
+    return (!v || v === "all") ? "all" : String(v);
+  }
+
+  function getQueryParams() {
+    const params = new URLSearchParams();
+    const store = getStoreParam();
+    if (store !== "all") params.set("store_id", store);
+
+    if (startInput.value) params.set("start", startInput.value);
+    if (endInput.value)   params.set("end",   endInput.value);
+
+    const statuses = getSelectedStatuses();
+    if (statuses.length) params.set("statuses", statuses.join(","));
+
+    if (sortSelect?.value) params.set("sort", sortSelect.value);
+
+    return params.toString();
+  }
+
+  function renderRows(rows) {
+    tableBody.innerHTML = "";
+    if (!rows || !rows.length) {
+      hide(countBadge);
+      show(emptyState);
+      return;
+    }
+    show(countBadge);
+    hide(emptyState);
+
+    countBadge.textContent = rows.length;
+
+    const fmt = (d) => d ? new Date(d).toLocaleString() : "-";
+
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${r.store_name ?? "-"}</td>
+        <td>${r.name}</td>
+        <td>${r.customer ?? "-"}</td>
+        <td>${r.total_price?.toFixed ? r.total_price.toFixed(2) : r.total_price ?? "-"}</td>
+        <td>${fmt(r.created_at)}</td>
+        <td><span class="badge badge-fin ${r.financial_status}">${r.financial_status ?? "-"}</span></td>
+        <td><span class="badge badge-ful ${r.fulfillment_status}">${r.fulfillment_status ?? "-"}</span></td>
+        <td>${r.courier_status ?? "-"}</td>
+        <td>${fmt(r.courier_status_at)}</td>
+        <td>
+          ${r.financial_status === "pending"
+            ? `<button class="btn btn-xs mark-paid" data-order-id="${r.id}" data-store-id="${r.store_id}">Mark as paid</button>`
+            : `<span class="text-muted">—</span>`}
+        </td>
+      `;
+      tableBody.appendChild(tr);
+    }
+  }
+
+  async function fetchStatuses() {
+    try {
+      const res = await fetch("/financials/statuses");
+      if (!res.ok) return;
+      const data = await res.json();
+      statusSelect.innerHTML = "";
+      // opțiunea goală pentru "toate"
+      const optAll = document.createElement("option");
+      optAll.value = "";
+      optAll.textContent = "Toate statusurile curier";
+      statusSelect.appendChild(optAll);
+
+      (data.statuses || []).forEach((s) => {
+        const opt = document.createElement("option");
+        opt.value = s;
+        opt.textContent = s;
+        statusSelect.appendChild(opt);
+      });
+    } catch (_) {}
+  }
+
+  async function loadOrders() {
+    // dacă view e "cleared", nu încărcăm nimic
+    if (localStorage.getItem(CLEARED_KEY) === "1") {
+      tableBody.innerHTML = "";
+      hide(countBadge);
+      show(emptyState);
+      return;
     }
 
-    // Sincronizare comenzi
-    syncButton.addEventListener('click', function() {
-        const startDate = document.getElementById('startDate').value;
-        const endDate = document.getElementById('endDate').value;
-        
-        if (!startDate || !endDate) {
-            showNotification('Te rog selectează un interval de date.', 'warning');
-            return;
-        }
-
-        const formData = new FormData();
-        formData.append('start_date', new Date(startDate).toISOString());
-        formData.append('end_date', new Date(endDate).toISOString());
-        // Momentan, trimitem ID-ul primului magazin. Ideal, aici ar trebui un selector.
-        formData.append('store_ids', 1); 
-
-        showNotification('Sincronizarea a început...', 'info');
-        
-        fetch('/financials/sync-range', {
-            method: 'POST',
-            body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.status === 'success') {
-                showNotification(data.message, 'success');
-                setTimeout(() => window.location.reload(), 1500);
-            } else {
-                showNotification('A apărut o eroare la sincronizare.', 'error');
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            showNotification('Eroare de rețea. Verifică consola.', 'error');
-        });
-    });
-
-    // Marcare ca plătit
-    markAsPaidButton.addEventListener('click', function() {
-        const selectedOrders = Array.from(orderCheckboxes)
-            .filter(cb => cb.checked)
-            .map(cb => cb.value);
-
-        if (selectedOrders.length === 0) {
-            showNotification('Te rog selectează cel puțin o comandă.', 'warning');
-            return;
-        }
-        
-        if (!confirm(`Ești sigur că vrei să marchezi ${selectedOrders.length} comenzi ca fiind plătite? Această acțiune va încerca să captureze plata în Shopify.`)) {
-            return;
-        }
-
-        const formData = new FormData();
-        selectedOrders.forEach(id => formData.append('order_ids', id));
-
-        fetch('/financials/mark-as-paid', {
-            method: 'POST',
-            body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-            showNotification(data.message, 'success');
-            if (data.failed_orders && data.failed_orders.length > 0) {
-                let errorMessage = 'Următoarele comenzi au eșuat:\n';
-                data.failed_orders.forEach(fail => {
-                    errorMessage += `- ${fail.name}: ${fail.error}\n`;
-                });
-                showNotification(errorMessage, 'error');
-            }
-            setTimeout(() => window.location.reload(), 2000);
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            showNotification('Eroare de rețea. Verifică consola.', 'error');
-        });
-    });
-
-    // Selectare/Deselectare totală
-    selectAllCheckbox.addEventListener('change', function() {
-        orderCheckboxes.forEach(cb => {
-            cb.checked = selectAllCheckbox.checked;
-        });
-    });
-    
-    // Filtrare
-    function applyFilters() {
-        const courierValue = courierFilter.value.toLowerCase();
-        const statusValue = statusFilter.value.toLowerCase();
-        
-        for (const row of ordersTable.rows) {
-            const courierCell = row.cells[5].textContent.toLowerCase().trim();
-            const statusCell = row.cells[6].textContent.toLowerCase().trim();
-            
-            const courierMatch = !courierValue || courierCell.includes(courierValue);
-            const statusMatch = !statusValue || statusCell.includes(statusValue);
-            
-            if (courierMatch && statusMatch) {
-                row.style.display = '';
-            } else {
-                row.style.display = 'none';
-            }
-        }
+    const query = getQueryParams();
+    try {
+      show(loadingBar);
+      const res = await fetch(`/financials/data?${query}`);
+      hide(loadingBar);
+      if (!res.ok) throw new Error("Eroare la încărcarea datelor");
+      const data = await res.json();
+      renderRows(data.rows || []);
+    } catch (e) {
+      hide(loadingBar);
+      console.error(e);
+      tableBody.innerHTML = "";
+      show(emptyState);
     }
-    
-    courierFilter.addEventListener('change', applyFilters);
-    statusFilter.addEventListener('input', applyFilters);
-});
+  }
+
+  async function startSync() {
+    disable(syncBtn);
+    try {
+      const payload = {
+        start_date: startInput.value || null,
+        end_date:   endInput.value   || null,
+        store_id:   getStoreParam(),   // "all" sau id
+      };
+      const res = await fetch("/financials/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error("Sync a eșuat");
+      // IMPORTANT: după sync, scoatem flagul de cleared și re-încărcăm
+      localStorage.removeItem(CLEARED_KEY);
+      await loadOrders();
+    } catch (e) {
+      console.error(e);
+      alert("Sync a eșuat. Vezi logs.");
+    } finally {
+      enable(syncBtn);
+    }
+  }
+
+  function clearView() {
+    // Persistăm "pagina goală" până la următorul sync
+    localStorage.setItem(CLEARED_KEY, "1");
+    tableBody.innerHTML = "";
+    hide(countBadge);
+    show(emptyState);
+  }
+
+  // Click pe rând – delegare pentru "Mark as paid"
+  tableBody.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest(".mark-paid");
+    if (!btn) return;
+    const orderId = btn.dataset.orderId;
+    const storeId = btn.dataset.storeId;
+
+    btn.disabled = true;
+    try {
+      const res = await fetch("/financials/mark-as-paid", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order_ids: [Number(orderId)], store_id: Number(storeId) }),
+      });
+      if (!res.ok) throw new Error("Mark as paid a eșuat");
+      // Scoatem rândul din tabel (cerință: să dispară imediat)
+      btn.closest("tr")?.remove();
+      // Update count
+      const left = qsa("#ordersTable tbody tr").length;
+      if (left === 0) {
+        hide(countBadge);
+        show(emptyState);
+      } else {
+        countBadge.textContent = left;
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Nu am reușit să marchez comanda ca plătită.");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Filtre: reîncarcă la schimbare
+  [storeSelect, statusSelect, sortSelect, startInput, endInput].forEach((el) => {
+    el?.addEventListener("change", loadOrders);
+  });
+
+  // Asigură că click pe inputul de dată deschide nativ pickerul
+  [startInput, endInput].forEach((el) => {
+    el?.addEventListener("click", () => el.showPicker && el.showPicker());
+  });
+
+  syncBtn?.addEventListener("click", startSync);
+  clearBtn?.addEventListener("click", clearView);
+
+  // Init
+  (async () => {
+    await fetchStatuses();
+    await loadOrders();
+  })();
+})();

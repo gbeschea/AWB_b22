@@ -31,10 +31,76 @@ class BaseCourier(ABC):
     async def get_label(self, awb: str, creds: dict, paper_size: str) -> bytes:
         raise NotImplementedError
 
-    async def get_credentials(self, db: AsyncSession, account_key: str) -> dict:
-        stmt = select(models.CourierAccount).where(models.CourierAccount.account_key == account_key)
-        result = await db.execute(stmt)
-        account = result.scalar_one_or_none()
-        if not account or not account.credentials:
-            raise ValueError(f"Nu s-au găsit credențiale pentru contul cu cheia '{account_key}'")
-        return account.credentials
+    async def get_credentials(self, db: AsyncSession, account_key: Optional[str]) -> dict:
+        """
+        Caută credențialele după:
+        1) match exact pe account_key
+        2) normalizări (lower/upper, '-' <-> '_')
+        3) aliasuri uzuale pe vendor (ex: 'dpd' -> dpdromania/dpd-ro/dpd-jg/dpd-px)
+        4) fallback: primul cont cu prefix de vendor (dpd% / sameday%)
+        """
+        from models import CourierAccount  # lazy import ca în codul tău
+
+        def _norms(k: str) -> list[str]:
+            k = (k or "").strip()
+            return list(dict.fromkeys([
+                k,
+                k.lower(),
+                k.upper(),
+                k.replace("_", "-"),
+                k.replace("-", "_"),
+            ]))
+
+        # 1) exact
+        if account_key:
+            stmt = select(CourierAccount).where(CourierAccount.account_key == account_key)
+            res = await db.execute(stmt)
+            acc = res.scalar_one_or_none()
+            if acc and acc.credentials:
+                return acc.credentials
+
+        # 2) normalizări
+        for k in _norms(account_key or ""):
+            if not k:
+                continue
+            stmt = select(CourierAccount).where(CourierAccount.account_key == k)
+            res = await db.execute(stmt)
+            acc = res.scalar_one_or_none()
+            if acc and acc.credentials:
+                return acc.credentials
+
+        # 3) aliasuri de vendor (acoperă cazul DPD din proiectul tău)
+        vendor_aliases: list[str] = []
+        ak = (account_key or "").strip().lower()
+        if ak.startswith("dpd"):
+            vendor_aliases = ["dpdromania", "dpd-ro", "dpd_jg", "dpd-jg", "dpd_px", "dpd-px", "dpd"]
+        elif ak.startswith("sameday"):
+            vendor_aliases = ["sameday"]
+
+        for alias in vendor_aliases:
+            for k in _norms(alias):
+                stmt = select(CourierAccount).where(CourierAccount.account_key == k)
+                res = await db.execute(stmt)
+                acc = res.scalar_one_or_none()
+                if acc and acc.credentials:
+                    return acc.credentials
+
+        # 4) fallback pe prefix (ultimul resort)
+        prefix = None
+        if ak.startswith("dpd"):
+            prefix = "dpd%"
+        elif ak.startswith("sameday"):
+            prefix = "sameday%"
+
+        if prefix:
+            stmt = (
+                select(CourierAccount)
+                .where(and_(CourierAccount.account_key.ilike(prefix), CourierAccount.credentials.isnot(None)))
+                .limit(1)
+            )
+            res = await db.execute(stmt)
+            acc = res.scalar_one_or_none()
+            if acc and acc.credentials:
+                return acc.credentials
+
+        raise ValueError(f"Nu s-au găsit credențiale pentru contul cu cheia '{account_key}'")

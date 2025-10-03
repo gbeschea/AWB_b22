@@ -1,63 +1,87 @@
-# /services/shopify_service.py
+import asyncio
+import logging
+from datetime import datetime
+from typing import Dict, Any, List, Union
 
 import httpx
-import logging
-import asyncio
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
+from sqlalchemy import select
 
 import models
 
+_logger = logging.getLogger(__name__)
+
+# Cache client httpx per store
 _shopify_clients: Dict[int, httpx.AsyncClient] = {}
 
+
+def _api_version(store: models.Store) -> str:
+    # dacă nu ai coloană api_version în tabel, funcția va cădea pe default
+    return getattr(store, "api_version", None) or "2025-07"
+
+
+def _token_fingerprint(tok: str) -> str:
+    if not tok:
+        return "<empty>"
+    t = tok.strip()
+    if len(t) <= 8:
+        return t
+    return f"{t[:4]}…{t[-4:]}"
+
+
 def get_shopify_client(store: models.Store) -> httpx.AsyncClient:
+    """
+    Reutilizează un AsyncClient per store pentru a păstra conexiunile.
+    Face strip() la token și loghează un fingerprint ca să vezi imediat dacă
+    DB conține tokenul corect sau un șir mascat '••••'.
+    """
     if store.id not in _shopify_clients:
+        token = (store.access_token or "").strip()
+
+        # atenționări utile în log
+        if not token:
+            _logger.warning("Store %s (%s) are token gol în DB!",
+                            store.name, store.domain)
+        if "•" in token:
+            _logger.error("Store %s (%s) are token MASCAT în DB (conține '•'). Actualizează-l!",
+                          store.name, store.domain)
+        if not token.startswith("shpat_"):
+            _logger.warning("Tokenul pentru %s pare ne-standard (fingerprint %s).",
+                            store.domain, _token_fingerprint(token))
+
         headers = {
-            "X-Shopify-Access-Token": store.access_token,
+            "X-Shopify-Access-Token": token,
             "Content-Type": "application/json",
         }
+        _logger.info("Shopify client pentru %s, token %s",
+                     store.domain, _token_fingerprint(token))
+
         _shopify_clients[store.id] = httpx.AsyncClient(
-            base_url=f"https://{store.domain}/admin/api/{store.api_version or '2025-07'}/",
+            base_url=f"https://{store.domain}/admin/api/{_api_version(store)}/",
             headers=headers,
-            timeout=30.0
+            timeout=30.0,
         )
     return _shopify_clients[store.id]
 
+
+
 async def get_store_from_db(db: AsyncSession, store_id: int) -> models.Store:
-    result = await db.execute(select(models.Store).where(models.Store.id == store_id))
-    store = result.scalar_one_or_none()
+    res = await db.execute(select(models.Store).where(models.Store.id == store_id))
+    store = res.scalar_one_or_none()
     if not store:
         raise ValueError(f"Magazinul cu ID-ul {store_id} nu a fost găsit.")
     return store
 
-async def fetch_orders(
-    db: AsyncSession, 
-    store_id: int, 
-    created_at_min: datetime,
-    created_at_max: datetime
-) -> List[Dict[str, Any]]:
+
+def _orders_query(include_pii: bool) -> str:
     """
-    Preia comenzile de la Shopify, incluzând datele esențiale despre livrări (fulfillments).
+    Construiește query-ul GraphQL. Când include_pii=False, nu cerem câmpuri care
+    au nevoie de access la obiectul Customer (evităm ACCESS_DENIED).
     """
-    store = await get_store_from_db(db, store_id)
-    client = get_shopify_client(store)
-    
-    all_orders = []
-    has_next_page = True
-    cursor = None
-    
-    # =================================================================
-    # MODIFICARE: Am actualizat interogarea pentru a include fulfillments și trackingInfo
-    # =================================================================
-    query = """
+    base = """
     query($first: Int!, $cursor: String, $query: String) {
       orders(first: $first, after: $cursor, query: $query) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
+        pageInfo { hasNextPage endCursor }
         edges {
           node {
             id
@@ -67,74 +91,101 @@ async def fetch_orders(
             displayFulfillmentStatus
             tags
             note
-            totalPriceSet { shopMoney { amount } }
-            customer { firstName lastName }
+            totalPriceSet { shopMoney { amount currencyCode } }
             paymentGatewayNames
-            shippingAddress { 
-                firstName, lastName, address1, address2, city, 
-                province, zip, country, phone 
-            }
             fulfillments {
-                id
-                createdAt
-                displayStatus
-                trackingInfo {
-                    company
-                    number
-                    url
-                }
+              id
+              createdAt
+              displayStatus
+              trackingInfo { company number url }
             }
+    """
+    if include_pii:
+        base += """
+            customer { firstName lastName }
+            shippingAddress {
+              firstName lastName address1 address2 city province zip country phone
+            }
+        """
+    base += """
           }
         }
       }
     }
     """
-    
-    start_date_str = created_at_min.isoformat()
-    end_date_str = created_at_max.isoformat()
-    
-    while has_next_page:
-        await asyncio.sleep(0.5) 
+    return base
 
+
+async def fetch_orders(
+    db: AsyncSession,
+    store_id: int,
+    created_at_min: datetime,
+    created_at_max: datetime,
+) -> List[Dict[str, Any]]:
+    """
+    Preia comenzile din Shopify. Dacă store.pii_source == "metafield", NU cerem câmpuri PII
+    (customer/shippingAddress) ca să evităm ACCESS_DENIED pe planuri fără acces la Customer.
+    """
+    store = await get_store_from_db(db, store_id)
+    client = get_shopify_client(store)
+
+    include_pii = (getattr(store, "pii_source", "") or "").lower() == "shopify"
+    query = _orders_query(include_pii)
+
+    start_str = created_at_min.isoformat()
+    end_str = created_at_max.isoformat()
+
+    all_orders: List[Dict[str, Any]] = []
+    cursor = None
+    has_next = True
+
+    while has_next:
+        # gentle pacing (ratelimit)
+        await asyncio.sleep(0.35)
         variables = {
             "first": 50,
             "cursor": cursor,
-            "query": f"created_at:>{start_date_str} created_at:<{end_date_str}"
+            "query": f"created_at:>{start_str} created_at:<{end_str}",
         }
-        
         try:
-            response = await client.post("graphql.json", json={"query": query, "variables": variables})
-            response.raise_for_status()
-            data = response.json()
-            
-            if "errors" in data:
-                if any(e.get('extensions', {}).get('code') == 'THROTTLED' for e in data['errors']):
-                    logging.warning("Shopify API Throttling detectat. Se așteaptă 5 secunde...")
+            r = await client.post("graphql.json", json={"query": query, "variables": variables})
+            r.raise_for_status()
+            payload = r.json()
+
+            # Dacă apar erori (inclusiv throttled), tratează-le
+            if "errors" in payload and payload["errors"]:
+                if any((e.get("extensions", {}) or {}).get("code") == "THROTTLED" for e in payload["errors"]):
+                    _logger.warning("Shopify throttling; sleep 5s și reîncerc...")
                     await asyncio.sleep(5)
-                    continue 
-                
-                logging.error(f"Eroare GraphQL la preluarea comenzilor pentru {store.domain}: {data['errors']}")
+                    continue
+                _logger.error("Eroare GraphQL la preluarea comenzilor pentru %s: %s",
+                              store.domain, payload["errors"])
+                # la erori de acces, nu insistăm; ieșim din buclă
                 break
 
-            orders_data = data.get("data", {}).get("orders", {})
-            page_info = orders_data.get("pageInfo", {})
-            
-            for edge in orders_data.get("edges", []):
+            data = (payload.get("data") or {}).get("orders") or {}
+            edges = data.get("edges") or []
+            for edge in edges:
                 all_orders.append(edge["node"])
-            
-            has_next_page = page_info.get("hasNextPage", False)
-            cursor = page_info.get("endCursor")
 
+            page_info = data.get("pageInfo") or {}
+            has_next = bool(page_info.get("hasNextPage"))
+            cursor = page_info.get("endCursor")
         except httpx.HTTPStatusError as e:
-            logging.error(f"Eroare HTTP la preluarea comenzilor pentru {store.domain}: {e.response.text}")
+            _logger.error("HTTP %s la preluarea comenzilor %s: %s",
+                          e.response.status_code, store.domain, e.response.text)
             break
-        except Exception as e:
-            logging.error(f"Eroare neașteptată la preluarea comenzilor pentru {store.domain}: {e}")
+        except Exception as ex:
+            _logger.exception("Eroare la preluarea comenzilor pentru %s: %s", store.domain, ex)
             break
-            
+
     return all_orders
 
-# ... restul fișierului (get_transactions, capture_payment) rămâne neschimbat ...
+
+# --------------------
+# Tranzacții / plăți
+# --------------------
+
 async def get_transactions(db: AsyncSession, store_id: int, order_id: str) -> List[Dict[str, Any]]:
     store = await get_store_from_db(db, store_id)
     client = get_shopify_client(store)
@@ -145,7 +196,7 @@ async def get_transactions(db: AsyncSession, store_id: int, order_id: str) -> Li
           id
           status
           kind
-          amountSet { shopMoney { amount } }
+          amountSet { shopMoney { amount currencyCode } }
           gateway
         }
       }
@@ -153,72 +204,84 @@ async def get_transactions(db: AsyncSession, store_id: int, order_id: str) -> Li
     """
     variables = {"orderId": f"gid://shopify/Order/{order_id}"}
     try:
-        response = await client.post("graphql.json", json={"query": query, "variables": variables})
-        response.raise_for_status()
-        data = response.json()
-        if "errors" in data:
-            logging.error(f"Eroare GraphQL la preluarea tranzacțiilor: {data['errors']}")
+        r = await client.post("graphql.json", json={"query": query, "variables": variables})
+        r.raise_for_status()
+        data = r.json()
+        if "errors" in data and data["errors"]:
+            _logger.error("Eroare GraphQL la tranzacții: %s", data["errors"])
             return []
-        return data.get("data", {}).get("order", {}).get("transactions", [])
-    except Exception as e:
-        logging.error(f"Eroare la preluarea tranzacțiilor pentru comanda {order_id}: {e}")
+        return (((data.get("data") or {}).get("order") or {}).get("transactions") or [])
+    except Exception as ex:
+        _logger.exception("Eroare la preluarea tranzacțiilor pentru comanda %s: %s", order_id, ex)
         return []
 
-async def capture_payment(db: AsyncSession, store_id: int, shopify_order_id: str):
+
+async def capture_payment(db: AsyncSession, store_id: int, shopify_order_id: str) -> None:
+    """
+    Încearcă să captureze o autorizare existentă; dacă nu există, marchează ca plătit.
+    """
     store = await get_store_from_db(db, store_id)
     client = get_shopify_client(store)
     order_gid = f"gid://shopify/Order/{shopify_order_id}"
-    transactions = await get_transactions(db, store_id, shopify_order_id)
-    auth_transaction = None
-    for t in transactions:
-        if t['kind'].upper() == 'AUTHORIZATION' and t['status'].upper() == 'SUCCESS':
-            auth_transaction = t
-            break
-    if not auth_transaction:
-        raise Exception("Nu a fost găsită o tranzacție de autorizare validă pentru capturare.")
+
+    txns = await get_transactions(db, store_id, shopify_order_id)
+    auth = next((t for t in txns if (t.get("kind", "").upper() == "AUTHORIZATION") and (t.get("status", "").upper() == "SUCCESS")), None)
+
+    if not auth:
+        # fallback: direct mark as paid (de ex. ramburs)
+        await mark_order_as_paid(db, store_id, shopify_order_id)
+        return
+
     mutation = """
     mutation captureTransaction($transactionId: ID!, $amount: MoneyInput!) {
       transactionCreate(transaction: {
         orderId: "%s",
         kind: CAPTURE,
-        gateway: "manual",
         amount: $amount.amount,
-        parentId: $transactionId,
-        currency: $amount.currencyCode
+        currency: $amount.currencyCode,
+        parentId: $transactionId
       }) {
-        transaction {
-          id
-          status
-        }
-        userErrors {
-          field
-          message
-        }
+        transaction { id status }
+        userErrors { field message }
       }
     }
     """ % order_gid
+
     variables = {
-        "transactionId": auth_transaction['id'],
+        "transactionId": auth["id"],
         "amount": {
-            "amount": auth_transaction['amountSet']['shopMoney']['amount'],
-            "currencyCode": auth_transaction['amountSet']['shopMoney'].get('currencyCode', 'RON')
-        }
+            "amount": auth["amountSet"]["shopMoney"]["amount"],
+            "currencyCode": auth["amountSet"]["shopMoney"].get("currencyCode", "RON"),
+        },
     }
-    try:
-        response = await client.post("graphql.json", json={"query": mutation, "variables": variables})
-        response.raise_for_status()
-        data = response.json()
-        errors = data.get("data", {}).get("transactionCreate", {}).get("userErrors", [])
-        if errors:
-            error_messages = ", ".join([e['message'] for e in errors])
-            raise Exception(f"Eroare la capturarea plății: {error_messages}")
-        transaction_data = data.get("data", {}).get("transactionCreate", {}).get("transaction", {})
-        if not transaction_data or transaction_data.get('status').upper() != 'SUCCESS':
-            raise Exception("Capturarea plății a eșuat în Shopify.")
-        logging.info(f"Plata pentru comanda {shopify_order_id} a fost capturată cu succes.")
-    except httpx.HTTPStatusError as e:
-        logging.error(f"Eroare HTTP la capturarea plății: {e.response.text}")
-        raise Exception(f"Eroare server Shopify: {e.response.status_code}")
-    except Exception as e:
-        logging.error(f"Eroare neașteptată la capturarea plății: {e}")
-        raise e
+    r = await client.post("graphql.json", json={"query": mutation, "variables": variables})
+    r.raise_for_status()
+    data = r.json()
+    errs = (((data.get("data") or {}).get("transactionCreate") or {}).get("userErrors") or [])
+    if errs:
+        raise RuntimeError(", ".join(e.get("message", "Unknown error") for e in errs))
+    txn = ((data.get("data") or {}).get("transactionCreate") or {}).get("transaction") or {}
+    if (txn.get("status", "") or "").upper() != "SUCCESS":
+        raise RuntimeError("Capturarea plății a eșuat în Shopify.")
+
+
+async def mark_order_as_paid(db: AsyncSession, store_id: int, shopify_order_id: Union[str, int]) -> None:
+    store = await get_store_from_db(db, store_id)
+    client = get_shopify_client(store)
+    order_gid = f"gid://shopify/Order/{shopify_order_id}"
+    mutation = """
+    mutation MarkPaid($input: OrderMarkAsPaidInput!) {
+      orderMarkAsPaid(input: $input) {
+        order { id financialStatus }
+        userErrors { field message }
+      }
+    }
+    """
+    variables = {"input": {"id": order_gid}}
+    r = await client.post("graphql.json", json={"query": mutation, "variables": variables})
+    r.raise_for_status()
+    data = r.json()
+    errs = (((data.get("data") or {}).get("orderMarkAsPaid") or {}).get("userErrors") or [])
+    if errs:
+        # <- aici era paranteza în plus în varianta ta
+        raise RuntimeError("; ".join(e.get("message", "Unknown error") for e in errs))

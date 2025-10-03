@@ -2,109 +2,192 @@
 
 {% block content %}
 <div class="container-fluid">
-    <h1 class="h3 mb-2 text-gray-800">Gestiune Financiară</h1>
-    <p class="mb-4">Sincronizați și gestionați statusul plăților pentru comenzile ramburs.</p>
 
-    <div class="card shadow mb-4">
-        <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">Panou de Control</h6>
-        </div>
-        <div class="card-body">
-            <div class="row">
-                <div class="col-md-5">
-                    <label>Sincronizează comenzi între:</label>
-                    <div class="input-group">
-                        <input type="date" id="startDate" class="form-control">
-                        <input type="date" id="endDate" class="form-control">
-                    </div>
-                </div>
-                <div class="col-md-2 d-flex align-items-end">
-                    <button id="syncButton" class="btn btn-primary btn-block">
-                        <i class="fas fa-sync-alt"></i> Sincronizează
-                    </button>
-                </div>
-                <div class="col-md-3 d-flex align-items-end ml-auto">
-                    <button id="markAsPaidButton" class="btn btn-success btn-block">
-                        <i class="fas fa-check-circle"></i> Marchează ca Plătit (Ramburs)
-                    </button>
-                </div>
-            </div>
-        </div>
+  <!-- Facelift CSS (doar pentru pagina asta) -->
+  <style>
+    /* layout & spacing */
+    .card + .card { margin-top: 1.25rem; }
+    .gap-12 { gap: 12px; }
+    .gap-16 { gap: 16px; }
+    .section-title { font-weight: 700; color: #4e73df; }
+
+    /* inputs */
+    input[type="date"] { cursor: pointer; }
+    #statusFilter { min-height: 220px; }
+
+    /* table look */
+    #ordersTable thead th {
+      position: sticky; top: 0; z-index: 1;
+      background: #f8f9fc; /* light */
+    }
+    #ordersTable tbody tr:nth-child(odd) { background: #fbfcff; }
+    #ordersTable tbody tr:hover { background:#eef2ff; }
+
+    /* badges */
+    .badge-soft {
+      display:inline-block; padding:.35rem .55rem; border-radius:.35rem; font-size:.85rem;
+    }
+    .badge-paid    { background:#e6f7ed; color:#197a3a; border:1px solid #cdebd9; }
+    .badge-pending { background:#fff7e6; color:#8a5d00; border:1px solid #ffecbf; }
+    .badge-other   { background:#eef2f7; color:#334155; border:1px solid #e3e8f1; }
+
+    /* top actions */
+    .actions-sticky {
+      position: sticky; bottom: 0; background: #fff; padding:.75rem;
+      border-top:1px solid #e3e6f0; display:flex; justify-content:flex-end; gap:10px;
+    }
+
+    /* helpers */
+    .muted { color:#6c757d; }
+  </style>
+
+  <h1 class="h4 mb-3 text-gray-800">Gestiune Financiară</h1>
+  <p class="mb-4">Sincronizează și marchează ca plătite comenzile ramburs
+    (<strong>Fulfilled</strong> + <strong>Payment Pending</strong>). Filtre&mdash;magazin, curier, statusuri, date.</p>
+
+  <!-- Panou de control -->
+  <div class="card shadow">
+    <div class="card-header d-flex align-items-center justify-content-between">
+      <span class="section-title">Panou de Control</span>
+      <button id="clearViewButton" class="btn btn-outline-secondary btn-sm">
+        <i class="fas fa-broom me-1"></i> Golește view-ul
+      </button>
     </div>
 
-    <div class="card shadow mb-4">
-        <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">Comenzi de Procesat</h6>
+    <div class="card-body">
+      <div class="row g-3 align-items-end">
+        <!-- Date range pentru sync -->
+        <div class="col-lg-5">
+          <label class="form-label">Sincronizează comenzi între:</label>
+          <div class="input-group">
+            <input type="date" id="startDate" class="form-control" onclick="this.showPicker?.()">
+            <input type="date" id="endDate" class="form-control" onclick="this.showPicker?.()">
+          </div>
         </div>
-        <div class="card-body">
-            <div class="row mb-3">
-                <div class="col-md-4">
-                    <label for="courierFilter">Filtrează după Curier:</label>
-                    <select id="courierFilter" class="form-control">
-                        <option value="">Toți Curierii</option>
-                        {% for courier in couriers %}
-                        <option value="{{ courier }}">{{ courier }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-                <div class="col-md-4">
-                    <label for="statusFilter">Filtrează după Status Curier:</label>
-                    <input type="text" id="statusFilter" class="form-control" placeholder="ex: Livrat, În tranzit...">
-                </div>
-            </div>
 
-            <div class="table-responsive">
-                <table class="table table-bordered" id="ordersTable" width="100%" cellspacing="0">
-                    <thead>
-                        <tr>
-                            <th><input type="checkbox" id="selectAll"></th>
-                            <th>Comandă</th>
-                            <th>Client</th>
-                            <th>Dată</th>
-                            <th>Status Plată</th>
-                            <th>Curier</th>
-                            <th>Status Brut Curier</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for order in orders %}
-                        <tr data-order-id="{{ order.id }}">
-                            <td><input type="checkbox" class="order-checkbox" value="{{ order.id }}"></td>
-                            <td>{{ order.name }}</td>
-                            <td>{{ order.customer }}</td>
-                            <td>{{ order.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-                            <td>
-                                <span class="badge badge-pill 
-                                    {% if order.financial_status == 'paid' %}badge-success
-                                    {% elif order.financial_status == 'pending' %}badge-warning
-                                    {% else %}badge-secondary{% endif %}">
-                                    {{ order.financial_status }}
-                                </span>
-                            </td>
-                            <td>
-                                {% if order.shipments %}
-                                    {{ order.shipments[0].courier }}
-                                {% else %}
-                                    -
-                                {% endif %}
-                            </td>
-                            <td>
-                                {% if order.shipments %}
-                                    {{ order.shipments[0].last_status }}
-                                {% else %}
-                                    -
-                                {% endif %}
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
+        <!-- Store -->
+        <div class="col-lg-3">
+          <label for="storeSelect" class="form-label">Magazin (opțional)</label>
+          <select id="storeSelect" class="form-control">
+            <option value="">Toate</option>
+            {% for s in stores %}
+              <option value="{{ s.id }}">{{ s.name }}</option>
+            {% endfor %}
+          </select>
         </div>
+
+        <!-- Acțiuni -->
+        <div class="col-lg-4 d-flex gap-12">
+          <button id="syncButton" class="btn btn-primary flex-fill">
+            <i class="fas fa-sync-alt me-1"></i> Sincronizează
+          </button>
+          <button id="markAsPaidButton" class="btn btn-success flex-fill">
+            <i class="fas fa-check-circle me-1"></i> Marchează ca Plătit (Ramburs)
+          </button>
+        </div>
+      </div>
+
+      <!-- View golit -->
+      <div id="clearedMessage" class="alert alert-secondary mt-3 d-none">
+        View golit. Pornește o nouă sincronizare pentru a revedea comenzi.
+      </div>
     </div>
+  </div>
+
+  <!-- Filtre + listă -->
+  <div class="card shadow">
+    <div class="card-header">
+      <span class="section-title">Comenzi de Procesat</span>
+    </div>
+
+    <div class="card-body">
+      <div class="row g-3 mb-3">
+        <div class="col-lg-4">
+          <label for="courierFilter" class="form-label">Filtrează după Curier</label>
+          <select id="courierFilter" class="form-control">
+            <option value="">Toți Curierii</option>
+            {% for c in couriers %}
+              {% if c %}
+                <option value="{{ c }}">{{ c }}</option>
+              {% endif %}
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="col-lg-4">
+          <label class="form-label">Filtrează după Dată</label>
+          <div class="input-group">
+            <input type="date" id="filterDateFrom" class="form-control" value="{{ date_from or '' }}" onclick="this.showPicker?.()">
+            <input type="date" id="filterDateTo"   class="form-control" value="{{ date_to or '' }}"   onclick="this.showPicker?.()">
+          </div>
+          <small class="text-muted">Click pe câmp pentru a deschide calendarul.</small>
+        </div>
+
+        <div class="col-lg-4">
+          <label for="statusFilter" class="form-label">Statusuri Curier (multi-select)</label>
+          <select id="statusFilter" class="form-control" multiple>
+            {% for s in statuses %}
+              <option value="{{ s }}">{{ s }}</option>
+            {% endfor %}
+          </select>
+          <small class="text-muted">Ține Cmd/Ctrl pentru selecții multiple.</small>
+        </div>
+      </div>
+
+      <div class="table-responsive" id="ordersTableWrapper">
+        <table class="table table-hover table-bordered align-middle mb-0" id="ordersTable">
+          <thead class="table-light">
+            <tr>
+              <th style="width:40px;"><input type="checkbox" id="selectAll"></th>
+              <th data-sort="order">Comandă</th>
+              <th data-sort="client">Client</th>
+              <th data-sort="date" id="dateHeader" style="cursor:pointer;">Dată</th>
+              <th data-sort="payment_status">Status Plată</th>
+              <th data-sort="fulfillment_status">Fulfillment</th>
+              <th data-sort="courier">Curier</th>
+              <th data-sort="courier_status">Status Brut Curier</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+            <tr data-order-id="{{ row.order_id }}">
+              <td><input type="checkbox" class="order-checkbox" value="{{ row.order_id }}"></td>
+              <td>{{ row.order_name }}</td>
+              <td>{{ row.client }}</td>
+              <td>
+                {% if row.date %}
+                  {{ row.date.strftime('%Y-%m-%d %H:%M') }}
+                {% else %}-{% endif %}
+              </td>
+              <td>
+                {% set fs = (row.financial_status or '')|lower %}
+                <span class="badge-soft {% if fs=='paid' %}badge-paid{% elif fs=='pending' %}badge-pending{% else %}badge-other{% endif %}">
+                  {{ row.financial_status or '-' }}
+                </span>
+              </td>
+              <td class="text-uppercase">{{ row.fulfillment_status or '-' }}</td>
+              <td>{{ row.courier or '-' }}</td>
+              <td>{{ row.courier_status or '-' }}</td>
+            </tr>
+            {% endfor %}
+            {% if not rows or rows|length == 0 %}
+              <tr><td colspan="8" class="text-center text-muted py-4">Niciun rezultat</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="actions-sticky">
+        <button id="markAsPaidButton" class="btn btn-success">
+          <i class="fas fa-check-circle me-1"></i> Marchează ca Plătit (Ramburs)
+        </button>
+      </div>
+    </div>
+  </div>
+
 </div>
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/financials.js"></script>
+  <script src="/static/js/financials.js"></script>
 {% endblock %}

@@ -8,6 +8,10 @@ from starlette.responses import JSONResponse
 from database import get_db
 from services import sync_service, address_service
 from schemas import SyncPayload # Asigură-te că acest import este corect
+from pydantic import BaseModel
+from typing import List, Optional
+
+
 
 
 
@@ -18,6 +22,7 @@ router = APIRouter(
 
 # O variabilă simplă pentru a preveni rularea a două sincronizări simultan
 sync_in_progress = False
+
 
 @router.post("/orders")
 # --- MODIFICARE AICI ---
