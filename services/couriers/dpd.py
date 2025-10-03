@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from typing import Optional, Dict, Any, Tuple
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import logging
 import httpx
 import json
 import re
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_
 
 import models
 from .base import BaseCourier, TrackingResponse
@@ -17,8 +17,107 @@ log = logging.getLogger("dpd")
 log.setLevel(logging.INFO)
 
 
+def _parse_iso_dt(s: str):
+    if not isinstance(s, str) or not s.strip():
+        return None
+    s2 = s.replace("Z", "+00:00")
+    # încercări clasice
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(s2, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(s2)
+    except Exception:
+        return None
+
+def _best(*vals):
+    for v in vals:
+        if isinstance(v, str) and v.strip():
+            return v
+    return None
+
+def _extract_dpd_status_and_date(payload: Dict[str, Any]) -> tuple[str, Optional[datetime]]:
+    parcels = payload.get("parcels") or payload.get("result") or []
+    if not parcels:
+        return "Unknown", None
+    p = parcels[0] or {}
+
+    # uneori API-ul dă 'events', alteori 'operations'/'history'
+    ops = p.get("events") or p.get("operations") or p.get("history") or []
+    if isinstance(ops, dict):
+        ops = [ops]
+
+    def _op_dt(op):
+        return _best(op.get("dateTime"), op.get("operationDateTime"), op.get("operationDate"), op.get("date")) or ""
+
+    if ops:
+        latest = max(ops, key=_op_dt)
+        status = _best(latest.get("name"), latest.get("operationName"), latest.get("status"), latest.get("description"), latest.get("message")) or "Unknown"
+        dt_raw = _best(latest.get("dateTime"), latest.get("operationDateTime"), latest.get("operationDate"), latest.get("date"))
+        return status, _parse_iso_dt(dt_raw)
+
+    # fallback pe câmpurile parcelului
+    status = _best(p.get("status"), p.get("lastOperationName"), p.get("lastOperation"), p.get("parcelStatus"), p.get("state")) or "Unknown"
+    dt_raw = _best(p.get("lastOperationDateTime"), p.get("statusDateTime"), p.get("dateTime"), p.get("lastOperationDate"))
+    return status, _parse_iso_dt(dt_raw)
+
+
 def _mask_headers(h: Optional[Dict[str, str]]) -> Dict[str, str]:
     return {k: ("***" if k.lower().startswith("authorization") else v) for k, v in (h or {}).items()}
+
+async def _resolve_creds(self, db: AsyncSession, account_key: Optional[str]) -> Optional[dict]:
+    """
+    Găsește credențialele pentru DPD din DB încercând:
+      1) exact account_key
+      2) variante normalizate
+      3) aliasuri uzuale pentru DPD
+      4) fallback: primul cont cu account_key ILIKE 'dpd%' și credentials nenule
+    """
+    # 1) exact
+    from .common import get_courier_account_by_key
+    if account_key:
+        acct = await get_courier_account_by_key(db, account_key)
+        if acct and getattr(acct, "credentials", None):
+            return acct.credentials
+
+    # 2) normalizări
+    candidates = []
+    if account_key:
+        k = account_key.strip()
+        candidates += [k, k.lower(), k.upper(), k.replace("_", "-"), k.replace("-", "_")]
+
+    # 3) aliasuri uzuale din proiect
+    candidates += ["dpdromania", "dpd-ro", "dpd-jg", "dpd-px", "dpd"]
+
+    seen = set()
+    for key in candidates:
+        kk = (key or "").strip()
+        if not kk or kk in seen:
+            continue
+        seen.add(kk)
+        acct = await get_courier_account_by_key(db, kk)
+        if acct and getattr(acct, "credentials", None):
+            return acct.credentials
+
+    # 4) fallback: orice cont DPD (account_key începe cu 'dpd')
+    from models import CourierAccount
+    stmt = (
+        select(CourierAccount)
+        .where(CourierAccount.account_key.ilike("dpd%"))
+        .limit(1)
+    )
+    res = await db.execute(stmt)
+    acct = res.scalar_one_or_none()
+    if acct and getattr(acct, "credentials", None):
+        return acct.credentials
+
+    return None
+
 
 DPD_BASE_URL = "https://api.dpd.ro/v1"
 DPD_PICKUP_CUTOFF_HOUR = 16
@@ -367,30 +466,46 @@ class DPDCourier(BaseCourier):
         except Exception as e:
             raise RuntimeError(f"O eroare neașteptată a apărut: {e}")
 
-    # tracking & label (nemodificate funcțional)
     async def track_awb(self, db: AsyncSession, awb: str, account_key: Optional[str]) -> TrackingResponse:
-        if not account_key:
-            return TrackingResponse(status="error", date=datetime.now(), raw_data={"error": "Account key is missing for DPD tracking."})
-        
-        creds = await self.get_credentials(db, account_key)
-        
-        url = f"{DPD_BASE_URL}/tracking/{awb}"
-        # Presupunem că DPD folosește user/parolă pentru a obține un token, sau un token direct
-        # Acest cod presupune un token direct in credentials
-        headers = {"Authorization": f"Bearer {creds.get('token')}"}
+        # 1) credențiale din DB (fără să crape)
         try:
-            res = await self.client.get(url, headers=headers)
-            if res.status_code == 404:
-                return TrackingResponse(status="not found", date=datetime.now(), raw_data=None)
-            res.raise_for_status()
-            data = res.json()
-            status = data.get("status", {}).get("status")
-            dt_str = data.get("status", {}).get("timestamp")
-            dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00")) if dt_str else None
-            return TrackingResponse(status=status, date=dt, raw_data=data)
-        except Exception as e:
-            log.error("Excepție tracking DPD %s: %s", awb, e)
-            return TrackingResponse(status="tracking-error", date=None, raw_data=None)
+            creds = await self.get_credentials(db, account_key)
+        except ValueError:
+            return TrackingResponse(status="no-credentials", date=None)
+
+        base = self._choose_base(creds) if hasattr(self, "_choose_base") else DPD_BASE_URL  # păstrează-ți funcția existentă
+        url = f"{base}/track/"  # păstrează forma pe care o folosești acum
+        body = {
+            "userName": creds.get("username") or creds.get("userName"),
+            "password": creds.get("password"),
+            "language": "EN",
+            "parcels": [{"id": awb}],
+            "lastOperationOnly": True,
+        }
+
+        # 2) primul request (ultima operațiune)
+        r = await self.client.post(url, json=body, headers={"Accept": "application/json"}, timeout=20.0, follow_redirects=False)
+        if r.status_code != 200:
+            return TrackingResponse(status=f"HTTP {r.status_code}", date=None)
+
+        data = r.json() if r.content else {}
+        status, dt = _extract_dpd_status_and_date(data)
+
+        if status == "Unknown":
+            body["lastOperationOnly"] = False
+            r2 = await self.client.post(
+                url,
+                json=body,
+                headers={"Accept": "application/json"},
+                timeout=20.0,
+                follow_redirects=False
+            )
+            if r2.status_code == 200:
+                data = r2.json() if r2.content else {}
+                status, dt = _extract_dpd_status_and_date(data)
+
+        return TrackingResponse(status=status, date=dt, raw_data=data)
+
 
 
     async def get_label(self, awb: str, creds: dict, paper_size: str) -> bytes:

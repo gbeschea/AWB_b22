@@ -101,7 +101,7 @@ class Shipment(Base):
   id = Column(Integer, primary_key=True)
   order_id = Column(Integer, ForeignKey('orders.id'))
   fulfillment_created_at = Column(TIMESTAMP(timezone=True), nullable=True)
-  shopify_fulfillment_id = Column(String(50), nullable=True, index=True)
+  shopify_fulfillment_id = Column(String(50), unique=True, index=True, nullable=True)
   awb = Column(String(64), index=True)
   courier_specific_data = Column(JSON, nullable=True)
   courier = Column(String(64), index=True)

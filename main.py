@@ -17,6 +17,8 @@ from settings import settings
 from database import engine
 import logging
 
+from routes.financials import router as financials_router
+
 from routes.couriers_profiles_full import settings_router as couriers_router
 
 
@@ -115,3 +117,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
+
+app.include_router(financials_router)
