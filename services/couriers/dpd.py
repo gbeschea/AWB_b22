@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Union
 from datetime import datetime, date, timedelta, timezone
 import logging
 import httpx
@@ -13,16 +13,102 @@ from sqlalchemy import select, and_
 import models
 from .base import BaseCourier, TrackingResponse
 
+_DPD_MAP = [
+    (r"\b(delivered|livrat|delivered back to sender)\b",           "DELIVERED"),
+    (r"\b(out ?for ?delivery|out_for_delivery|predict)\b",         "OUT_FOR_DELIVERY"),
+    (r"\b(in[- _]?transit|arrival|arrived|ready for delivery)\b",  "IN_TRANSIT"),
+    (r"\b(label[_ ]?printed|awb created|shipment data received)\b","LABEL_PRINTED"),
+    (r"\b(not[_ ]?delivered|failed)\b",                            "NOT_DELIVERED"),
+    (r"\b(cancel|canceled|cancelled)\b",                           "CANCELED"),
+    (r"\b(fulfilled|picked|handed over)\b",                        "FULFILLED"),
+]
+
+def dpd_payload(src: Union[httpx.Response, dict, None]) -> dict:
+    """
+    Normalizează payload-ul de la DPD: acceptă direct dict sau httpx.Response.
+    Întoarce mereu un dict (sau {} la eroare / content gol).
+    """
+    if src is None:
+        return {}
+    if isinstance(src, dict):
+        return src
+    try:
+        return src.json() if getattr(src, "content", None) else {}
+    except Exception:
+        return {}
+
+
+
+def _normalize_status(raw: str) -> str:
+    t = (raw or "").lower()
+    for pat, norm in _DPD_MAP:
+        if re.search(pat, t):
+            return norm
+    return "IN_TRANSIT"  # fallback
+
+
+def _parse_dt(val: str | None) -> datetime | None:
+    if not val:
+        return None
+    try:
+        # DPD trimite de obicei ISO; forțăm tz
+        dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+def extract_latest_from_dpd(payload: dict) -> tuple[str, str, datetime | None]:
+    """
+    Returnează: (normalized, raw_status, when)
+    """
+    # payload['parcels'][0]['history'] sau payload['history']
+    history = []
+    if isinstance(payload, dict):
+        if "parcels" in payload and payload["parcels"]:
+            history = payload["parcels"][0].get("history") or []
+        if not history and "history" in payload:
+            history = payload.get("history") or []
+
+    if not history:
+        return ("IN_TRANSIT", "UNKNOWN", None)
+
+    def _key(ev):
+        # câmpuri posibile de timp în răspunsul DPD
+        for k in ("eventDate", "date", "operationDate", "timestamp"):
+            if ev.get(k):
+                d = _parse_dt(ev[k])
+                if d:
+                    return d
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    latest = max(history, key=_key)
+
+    raw = latest.get("event") or latest.get("eventName") or latest.get("status") or latest.get("message") or "UNKNOWN"
+    when = _key(latest)
+    normalized = _normalize_status(raw)
+    return (normalized, raw, when)
+
+
+
 log = logging.getLogger("dpd")
 log.setLevel(logging.INFO)
-
 
 def _parse_iso_dt(s: str):
     if not isinstance(s, str) or not s.strip():
         return None
     s2 = s.replace("Z", "+00:00")
-    # încercări clasice
-    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+
+    # formate frecvente, inclusiv cu ms și dd.MM.yyyy
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%d.%m.%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%Y",
+    ):
         try:
             dt = datetime.strptime(s2, fmt)
             if dt.tzinfo is None:
@@ -34,6 +120,8 @@ def _parse_iso_dt(s: str):
         return datetime.fromisoformat(s2)
     except Exception:
         return None
+
+
 
 def _best(*vals):
     for v in vals:
@@ -53,12 +141,36 @@ def _extract_dpd_status_and_date(payload: Dict[str, Any]) -> tuple[str, Optional
         ops = [ops]
 
     def _op_dt(op):
-        return _best(op.get("dateTime"), op.get("operationDateTime"), op.get("operationDate"), op.get("date")) or ""
+        raw = _best(
+            op.get("dateTime"),
+            op.get("operationDateTime"),
+            op.get("operationDate"),
+            op.get("date"),
+        )
+        dt = _parse_iso_dt(raw)
+        return dt or datetime.min.replace(tzinfo=timezone.utc)
 
     if ops:
-        latest = max(ops, key=_op_dt)
-        status = _best(latest.get("name"), latest.get("operationName"), latest.get("status"), latest.get("description"), latest.get("message")) or "Unknown"
-        dt_raw = _best(latest.get("dateTime"), latest.get("operationDateTime"), latest.get("operationDate"), latest.get("date"))
+        latest = max(
+            ops,
+            key=lambda op: (
+                _op_dt(op),
+                int(op.get("operationId") or op.get("eventId") or op.get("sequenceNumber") or 0),
+            ),
+        )
+        status = _best(
+            latest.get("name"),
+            latest.get("operationName"),
+            latest.get("status"),
+            latest.get("description"),
+            latest.get("message"),
+        ) or "Unknown"
+        dt_raw = _best(
+            latest.get("dateTime"),
+            latest.get("operationDateTime"),
+            latest.get("operationDate"),
+            latest.get("date"),
+        )
         return status, _parse_iso_dt(dt_raw)
 
     # fallback pe câmpurile parcelului

@@ -1,219 +1,194 @@
-// static/financials.js
+// static/js/financials.js
+document.addEventListener('DOMContentLoaded', () => {
+  // ----- Controls (filters)
+  const storeFilter   = document.getElementById('storeFilter');
+  const courierFilter = document.getElementById('courierFilter');
+  const fromInput     = document.getElementById('ordersFrom');
+  const toInput       = document.getElementById('ordersTo');
+  const statusMulti   = document.getElementById('statusMulti');
 
-(() => {
-  const qs = (sel) => document.querySelector(sel);
-  const qsa = (sel) => Array.from(document.querySelectorAll(sel));
+  // ----- Table
+  const tbody       = document.getElementById('orders-tbody');
+  const countSpan   = document.getElementById('orders-count');
+  const selectAll   = document.getElementById('selectAll');
+  const markPaidBtn = document.getElementById('markPaidBtn');
 
-  // Elemente
-  const storeSelect = qs("#storeSelect");
-  const statusSelect = qs("#statusSelect");          // <select multiple> populat de backend
-  const startInput  = qs("#startDate");
-  const endInput    = qs("#endDate");
-  const sortSelect  = qs("#sortSelect");
-  const syncBtn     = qs("#syncBtn");
-  const clearBtn    = qs("#clearViewBtn");
-  const tableBody   = qs("#ordersTable tbody");
-  const emptyState  = qs("#emptyState");             // un <div> cu mesaj "Nu sunt date"
-  const countBadge  = qs("#rowsCount");
-  const loadingBar  = qs("#loadingBar");             // o bară / spinner simplu
+  // ----- Sync panel
+  const startDate   = document.getElementById('startDate');
+  const endDate     = document.getElementById('endDate');
+  const storeSelect = document.getElementById('storeSelect');
+  const syncButton  = document.getElementById('syncButton');
+  const clearBtn    = document.getElementById('clearViewButton');
+  const clearedMsg  = document.getElementById('clearedMessage');
 
-  const CLEARED_KEY = "financialsCleared";
+  // ---- Make date inputs open the picker only on a user gesture
+  ['startDate','endDate','ordersFrom','ordersTo'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('pointerdown', () => {
+      if (typeof el.showPicker === 'function') {
+        try { el.showPicker(); } catch (_) {}
+      }
+    });
+  });
 
-  // Utils
-  const show = (el) => el && (el.style.display = "");
-  const hide = (el) => el && (el.style.display = "none");
-  const enable = (el) => el && (el.disabled = false);
-  const disable = (el) => el && (el.disabled = true);
+  // ---- Avoid implicit selection of first option in a <select multiple>
+  if (statusMulti) Array.from(statusMulti.options).forEach(o => (o.selected = false));
 
-  function getSelectedStatuses() {
-    return qsa("#statusSelect option:checked").map(o => o.value);
-  }
+  // ---- Helpers
+  const fmtDate = iso => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime())
+      ? ''
+      : d.toLocaleDateString('ro-RO', { year: 'numeric', month: '2-digit', day: '2-digit' });
+  };
 
-  function getStoreParam() {
-    const v = storeSelect?.value ?? "all";
-    return (!v || v === "all") ? "all" : String(v);
-  }
+  const getSelectedStatuses = () =>
+    Array.from(statusMulti?.selectedOptions || []).map(o => o.value).filter(Boolean);
 
-  function getQueryParams() {
-    const params = new URLSearchParams();
-    const store = getStoreParam();
-    if (store !== "all") params.set("store_id", store);
-
-    if (startInput.value) params.set("start", startInput.value);
-    if (endInput.value)   params.set("end",   endInput.value);
-
-    const statuses = getSelectedStatuses();
-    if (statuses.length) params.set("statuses", statuses.join(","));
-
-    if (sortSelect?.value) params.set("sort", sortSelect.value);
-
-    return params.toString();
-  }
-
-  function renderRows(rows) {
-    tableBody.innerHTML = "";
-    if (!rows || !rows.length) {
-      hide(countBadge);
-      show(emptyState);
+  // ---- Render
+  const renderRows = rows => {
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 8;
+      td.className = 'text-center text-muted py-4';
+      td.textContent = 'Niciun rezultat';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      countSpan.textContent = '0 rezultate';
       return;
     }
-    show(countBadge);
-    hide(emptyState);
 
-    countBadge.textContent = rows.length;
+    rows.forEach(r => {
+      const tr = document.createElement('tr');
 
-    const fmt = (d) => d ? new Date(d).toLocaleString() : "-";
+      const tdSel = document.createElement('td');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'row-select';
+      cb.value = r.id;
+      tdSel.appendChild(cb);
 
-    for (const r of rows) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${r.store_name ?? "-"}</td>
-        <td>${r.name}</td>
-        <td>${r.customer ?? "-"}</td>
-        <td>${r.total_price?.toFixed ? r.total_price.toFixed(2) : r.total_price ?? "-"}</td>
-        <td>${fmt(r.created_at)}</td>
-        <td><span class="badge badge-fin ${r.financial_status}">${r.financial_status ?? "-"}</span></td>
-        <td><span class="badge badge-ful ${r.fulfillment_status}">${r.fulfillment_status ?? "-"}</span></td>
-        <td>${r.courier_status ?? "-"}</td>
-        <td>${fmt(r.courier_status_at)}</td>
-        <td>
-          ${r.financial_status === "pending"
-            ? `<button class="btn btn-xs mark-paid" data-order-id="${r.id}" data-store-id="${r.store_id}">Mark as paid</button>`
-            : `<span class="text-muted">—</span>`}
-        </td>
-      `;
-      tableBody.appendChild(tr);
-    }
-  }
+      const tdOrder = document.createElement('td');   tdOrder.textContent = r.name || r.id;
+      const tdCust  = document.createElement('td');   tdCust.textContent  = r.customer || '-';
+      const tdDate  = document.createElement('td');   tdDate.textContent  = fmtDate(r.created_at);
+      const tdFin   = document.createElement('td');   tdFin.textContent   = r.financial_status || '';
+      const tdFulf  = document.createElement('td');   tdFulf.textContent  = r.fulfillment_status || '';
+      const tdC     = document.createElement('td');   tdC.textContent     = r.courier || '';
+      const tdCRaw  = document.createElement('td');   tdCRaw.textContent  = r.courier_raw_status || '';
 
-  async function fetchStatuses() {
-    try {
-      const res = await fetch("/financials/statuses");
-      if (!res.ok) return;
-      const data = await res.json();
-      statusSelect.innerHTML = "";
-      // opțiunea goală pentru "toate"
-      const optAll = document.createElement("option");
-      optAll.value = "";
-      optAll.textContent = "Toate statusurile curier";
-      statusSelect.appendChild(optAll);
+      tr.append(tdSel, tdOrder, tdCust, tdDate, tdFin, tdFulf, tdC, tdCRaw);
+      tbody.appendChild(tr);
+    });
+    countSpan.textContent = `${rows.length} rezultate`;
 
-      (data.statuses || []).forEach((s) => {
-        const opt = document.createElement("option");
-        opt.value = s;
-        opt.textContent = s;
-        statusSelect.appendChild(opt);
-      });
-    } catch (_) {}
-  }
+    // Populate courier dropdown from data (preserve current selection & "Toți Curierii")
+    const current = courierFilter.value;
+    const keepFirst = courierFilter.options[0]; // "Toți Curierii"
+    const values = new Set(['', ...rows.map(r => r.courier).filter(Boolean)]);
+    while (courierFilter.options.length) courierFilter.remove(0);
+    courierFilter.appendChild(keepFirst);
+    values.delete(''); // we already have the blank option
+    [...values].sort().forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v; opt.textContent = v;
+      courierFilter.appendChild(opt);
+    });
+    // restore selection if still available
+    if (values.has(current)) courierFilter.value = current;
+  };
 
+  // ---- Fetch list
   async function loadOrders() {
-    // dacă view e "cleared", nu încărcăm nimic
-    if (localStorage.getItem(CLEARED_KEY) === "1") {
-      tableBody.innerHTML = "";
-      hide(countBadge);
-      show(emptyState);
-      return;
-    }
+    const params = new URLSearchParams();
+    if (storeFilter?.value)   params.set('store_id', storeFilter.value);
+    if (courierFilter?.value) params.set('courier', courierFilter.value);
+    if (fromInput?.value)     params.set('start', fromInput.value);
+    if (toInput?.value)       params.set('end', toInput.value);
 
-    const query = getQueryParams();
+    const sts = getSelectedStatuses();
+    if (sts.length) params.set('statuses', sts.join(','));
+
     try {
-      show(loadingBar);
-      const res = await fetch(`/financials/data?${query}`);
-      hide(loadingBar);
-      if (!res.ok) throw new Error("Eroare la încărcarea datelor");
+      const res = await fetch(`/financials/data?${params.toString()}`);
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       const data = await res.json();
-      renderRows(data.rows || []);
-    } catch (e) {
-      hide(loadingBar);
-      console.error(e);
-      tableBody.innerHTML = "";
-      show(emptyState);
+      renderRows(Array.isArray(data.rows) ? data.rows : []);
+    } catch (err) {
+      console.error('Eroare la /financials/data:', err);
+      renderRows([]);
     }
   }
 
-  async function startSync() {
-    disable(syncBtn);
+  // ---- Mark as Paid
+  async function markSelectedPaid() {
+    const ids = Array.from(document.querySelectorAll('.row-select:checked')).map(i => i.value);
+    if (!ids.length) return;
+
+    const fd = new FormData();
+    ids.forEach(id => fd.append('order_ids', id));
+
     try {
-      const payload = {
-        start_date: startInput.value || null,
-        end_date:   endInput.value   || null,
-        store_id:   getStoreParam(),   // "all" sau id
-      };
-      const res = await fetch("/financials/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error("Sync a eșuat");
-      // IMPORTANT: după sync, scoatem flagul de cleared și re-încărcăm
-      localStorage.removeItem(CLEARED_KEY);
+      const res = await fetch('/financials/mark-as-paid', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       await loadOrders();
     } catch (e) {
-      console.error(e);
-      alert("Sync a eșuat. Vezi logs.");
-    } finally {
-      enable(syncBtn);
+      console.error('mark-as-paid error:', e);
     }
   }
 
-  function clearView() {
-    // Persistăm "pagina goală" până la următorul sync
-    localStorage.setItem(CLEARED_KEY, "1");
-    tableBody.innerHTML = "";
-    hide(countBadge);
-    show(emptyState);
-  }
+  // ---- Sync
+  async function doSync() {
+    const payload = {
+      start: startDate?.value || null,
+      end:   endDate?.value   || null,
+      store_id: storeSelect?.value ? Number(storeSelect.value) : null,
+    };
 
-  // Click pe rând – delegare pentru "Mark as paid"
-  tableBody.addEventListener("click", async (ev) => {
-    const btn = ev.target.closest(".mark-paid");
-    if (!btn) return;
-    const orderId = btn.dataset.orderId;
-    const storeId = btn.dataset.storeId;
-
-    btn.disabled = true;
-    try {
-      const res = await fetch("/financials/mark-as-paid", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ order_ids: [Number(orderId)], store_id: Number(storeId) }),
+    // Try /sync-range first, fall back to /sync if needed
+    async function post(url) {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error("Mark as paid a eșuat");
-      // Scoatem rândul din tabel (cerință: să dispară imediat)
-      btn.closest("tr")?.remove();
-      // Update count
-      const left = qsa("#ordersTable tbody tr").length;
-      if (left === 0) {
-        hide(countBadge);
-        show(emptyState);
-      } else {
-        countBadge.textContent = left;
-      }
-    } catch (e) {
-      console.error(e);
-      alert("Nu am reușit să marchez comanda ca plătită.");
-    } finally {
-      btn.disabled = false;
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json();
     }
+
+    try {
+      try { await post('/financials/sync-range'); }
+      catch { await post('/financials/sync'); }
+      await loadOrders();
+    } catch (e) {
+      console.error('sync error:', e);
+    }
+  }
+
+  // ---- Events
+  [storeFilter, courierFilter, fromInput, toInput, statusMulti].forEach(el => {
+    if (el) el.addEventListener('change', loadOrders);
   });
 
-  // Filtre: reîncarcă la schimbare
-  [storeSelect, statusSelect, sortSelect, startInput, endInput].forEach((el) => {
-    el?.addEventListener("change", loadOrders);
+  if (selectAll) {
+    selectAll.addEventListener('change', () => {
+      document.querySelectorAll('.row-select').forEach(cb => { cb.checked = selectAll.checked; });
+    });
+  }
+
+  if (markPaidBtn) markPaidBtn.addEventListener('click', markSelectedPaid);
+  if (syncButton)  syncButton.addEventListener('click', doSync);
+  if (clearBtn)    clearBtn.addEventListener('click', () => {
+    tbody.innerHTML = '';
+    countSpan.textContent = '';
+    // keep only the first option (“Toți Curierii”)
+    while (courierFilter.options.length > 1) courierFilter.remove(1);
+    clearedMsg?.classList.remove('d-none');
   });
 
-  // Asigură că click pe inputul de dată deschide nativ pickerul
-  [startInput, endInput].forEach((el) => {
-    el?.addEventListener("click", () => el.showPicker && el.showPicker());
-  });
-
-  syncBtn?.addEventListener("click", startSync);
-  clearBtn?.addEventListener("click", clearView);
-
-  // Init
-  (async () => {
-    await fetchStatuses();
-    await loadOrders();
-  })();
-})();
+  // ---- Initial load
+  loadOrders();
+});

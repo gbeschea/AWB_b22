@@ -2,189 +2,105 @@
 
 {% block content %}
 <div class="container-fluid">
+  <h1 class="h4 mb-3">Gestiune Financiară</h1>
+  <p class="text-muted">Afișează doar comenzile <strong>Fulfilled</strong> cu <strong>Payment Pending</strong>. Poți filtra după magazin, curier, status curier și interval.</p>
 
-  <!-- Facelift CSS (doar pentru pagina asta) -->
-  <style>
-    /* layout & spacing */
-    .card + .card { margin-top: 1.25rem; }
-    .gap-12 { gap: 12px; }
-    .gap-16 { gap: 16px; }
-    .section-title { font-weight: 700; color: #4e73df; }
-
-    /* inputs */
-    input[type="date"] { cursor: pointer; }
-    #statusFilter { min-height: 220px; }
-
-    /* table look */
-    #ordersTable thead th {
-      position: sticky; top: 0; z-index: 1;
-      background: #f8f9fc; /* light */
-    }
-    #ordersTable tbody tr:nth-child(odd) { background: #fbfcff; }
-    #ordersTable tbody tr:hover { background:#eef2ff; }
-
-    /* badges */
-    .badge-soft {
-      display:inline-block; padding:.35rem .55rem; border-radius:.35rem; font-size:.85rem;
-    }
-    .badge-paid    { background:#e6f7ed; color:#197a3a; border:1px solid #cdebd9; }
-    .badge-pending { background:#fff7e6; color:#8a5d00; border:1px solid #ffecbf; }
-    .badge-other   { background:#eef2f7; color:#334155; border:1px solid #e3e8f1; }
-
-    /* top actions */
-    .actions-sticky {
-      position: sticky; bottom: 0; background: #fff; padding:.75rem;
-      border-top:1px solid #e3e6f0; display:flex; justify-content:flex-end; gap:10px;
-    }
-
-    /* helpers */
-    .muted { color:#6c757d; }
-  </style>
-
-  <h1 class="h4 mb-3 text-gray-800">Gestiune Financiară</h1>
-  <p class="mb-4">Sincronizează și marchează ca plătite comenzile ramburs
-    (<strong>Fulfilled</strong> + <strong>Payment Pending</strong>). Filtre&mdash;magazin, curier, statusuri, date.</p>
-
-  <!-- Panou de control -->
-  <div class="card shadow">
-    <div class="card-header d-flex align-items-center justify-content-between">
-      <span class="section-title">Panou de Control</span>
-      <button id="clearViewButton" class="btn btn-outline-secondary btn-sm">
-        <i class="fas fa-broom me-1"></i> Golește view-ul
-      </button>
+  <!-- Panou de Control (Sync) -->
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <strong>Panou de Control</strong>
+      <button id="clearViewButton" class="btn btn-outline-secondary btn-sm">Golește view-ul</button>
     </div>
-
     <div class="card-body">
-      <div class="row g-3 align-items-end">
-        <!-- Date range pentru sync -->
-        <div class="col-lg-5">
+      <div class="row g-3">
+        <div class="col-12 col-md-3">
           <label class="form-label">Sincronizează comenzi între:</label>
-          <div class="input-group">
-            <input type="date" id="startDate" class="form-control" onclick="this.showPicker?.()">
-            <input type="date" id="endDate" class="form-control" onclick="this.showPicker?.()">
-          </div>
+          <input id="startDate" class="form-control" type="date" placeholder="dd.mm.yyyy" />
         </div>
-
-        <!-- Store -->
-        <div class="col-lg-3">
-          <label for="storeSelect" class="form-label">Magazin (opțional)</label>
-          <select id="storeSelect" class="form-control">
+        <div class="col-12 col-md-3">
+          <label class="form-label">&nbsp;</label>
+          <input id="endDate" class="form-control" type="date" placeholder="dd.mm.yyyy" />
+        </div>
+        <div class="col-12 col-md-4">
+          <label class="form-label">Magazin (opțional)</label>
+          <select id="storeSelect" class="form-select">
             <option value="">Toate</option>
             {% for s in stores %}
               <option value="{{ s.id }}">{{ s.name }}</option>
             {% endfor %}
           </select>
         </div>
-
-        <!-- Acțiuni -->
-        <div class="col-lg-4 d-flex gap-12">
-          <button id="syncButton" class="btn btn-primary flex-fill">
-            <i class="fas fa-sync-alt me-1"></i> Sincronizează
-          </button>
-          <button id="markAsPaidButton" class="btn btn-success flex-fill">
-            <i class="fas fa-check-circle me-1"></i> Marchează ca Plătit (Ramburs)
-          </button>
+        <div class="col-12 col-md-2 d-flex align-items-end">
+          <button id="syncButton" class="btn btn-primary w-100">🚀 Sincronizează</button>
         </div>
       </div>
-
-      <!-- View golit -->
-      <div id="clearedMessage" class="alert alert-secondary mt-3 d-none">
-        View golit. Pornește o nouă sincronizare pentru a revedea comenzi.
-      </div>
+      <div id="clearedMessage" class="small text-muted mt-2 d-none">View golit. Pornește o nouă sincronizare.</div>
     </div>
   </div>
 
-  <!-- Filtre + listă -->
-  <div class="card shadow">
-    <div class="card-header">
-      <span class="section-title">Comenzi de Procesat</span>
-    </div>
-
+  <!-- Comenzi de Procesat -->
+  <div class="card">
+    <div class="card-header"><strong>Comenzi de Procesat</strong></div>
     <div class="card-body">
-      <div class="row g-3 mb-3">
-        <div class="col-lg-4">
-          <label for="courierFilter" class="form-label">Filtrează după Curier</label>
-          <select id="courierFilter" class="form-control">
+      <div class="row g-3">
+        <div class="col-12 col-md-3">
+          <label class="form-label">Filtrează după Curier</label>
+          <select id="courierFilter" class="form-select">
             <option value="">Toți Curierii</option>
-            {% for c in couriers %}
-              {% if c %}
-                <option value="{{ c }}">{{ c }}</option>
-              {% endif %}
-            {% endfor %}
           </select>
         </div>
-
-        <div class="col-lg-4">
+        <div class="col-12 col-md-3">
           <label class="form-label">Filtrează după Dată</label>
-          <div class="input-group">
-            <input type="date" id="filterDateFrom" class="form-control" value="{{ date_from or '' }}" onclick="this.showPicker?.()">
-            <input type="date" id="filterDateTo"   class="form-control" value="{{ date_to or '' }}"   onclick="this.showPicker?.()">
-          </div>
-          <small class="text-muted">Click pe câmp pentru a deschide calendarul.</small>
+          <input id="ordersFrom" class="form-control" type="date" placeholder="dd.mm.yyyy" />
         </div>
-
-        <div class="col-lg-4">
-          <label for="statusFilter" class="form-label">Statusuri Curier (multi-select)</label>
-          <select id="statusFilter" class="form-control" multiple>
-            {% for s in statuses %}
-              <option value="{{ s }}">{{ s }}</option>
+        <div class="col-12 col-md-3">
+          <label class="form-label">&nbsp;</label>
+          <input id="ordersTo" class="form-control" type="date" placeholder="dd.mm.yyyy" />
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label">Magazin</label>
+          <select id="storeFilter" class="form-select">
+            <option value="">Toate</option>
+            {% for s in stores %}
+              <option value="{{ s.id }}">{{ s.name }}</option>
             {% endfor %}
           </select>
-          <small class="text-muted">Ține Cmd/Ctrl pentru selecții multiple.</small>
+        </div>
+        <div class="col-12">
+          <label class="form-label">Statusuri Curier (multi-select)</label>
+          <select id="statusMulti" class="form-select" multiple size="8">
+            {% for st in courier_statuses %}
+              <option value="{{ st }}">{{ st }}</option>
+            {% endfor %}
+          </select>
+          <div class="form-text">Ține Cmd/Ctrl pentru selecții multiple.</div>
         </div>
       </div>
 
-      <div class="table-responsive" id="ordersTableWrapper">
-        <table class="table table-hover table-bordered align-middle mb-0" id="ordersTable">
+      <div class="table-responsive mt-3">
+        <table class="table table-sm align-middle">
           <thead class="table-light">
             <tr>
-              <th style="width:40px;"><input type="checkbox" id="selectAll"></th>
-              <th data-sort="order">Comandă</th>
-              <th data-sort="client">Client</th>
-              <th data-sort="date" id="dateHeader" style="cursor:pointer;">Dată</th>
-              <th data-sort="payment_status">Status Plată</th>
-              <th data-sort="fulfillment_status">Fulfillment</th>
-              <th data-sort="courier">Curier</th>
-              <th data-sort="courier_status">Status Brut Curier</th>
+              <th style="width:32px;"><input id="selectAll" type="checkbox" /></th>
+              <th>Comandă</th>
+              <th>Client</th>
+              <th>Dată</th>
+              <th>Status Plată</th>
+              <th>Fulfillment</th>
+              <th>Curier</th>
+              <th>Status Brut Curier</th>
             </tr>
           </thead>
-          <tbody>
-            {% for row in rows %}
-            <tr data-order-id="{{ row.order_id }}">
-              <td><input type="checkbox" class="order-checkbox" value="{{ row.order_id }}"></td>
-              <td>{{ row.order_name }}</td>
-              <td>{{ row.client }}</td>
-              <td>
-                {% if row.date %}
-                  {{ row.date.strftime('%Y-%m-%d %H:%M') }}
-                {% else %}-{% endif %}
-              </td>
-              <td>
-                {% set fs = (row.financial_status or '')|lower %}
-                <span class="badge-soft {% if fs=='paid' %}badge-paid{% elif fs=='pending' %}badge-pending{% else %}badge-other{% endif %}">
-                  {{ row.financial_status or '-' }}
-                </span>
-              </td>
-              <td class="text-uppercase">{{ row.fulfillment_status or '-' }}</td>
-              <td>{{ row.courier or '-' }}</td>
-              <td>{{ row.courier_status or '-' }}</td>
-            </tr>
-            {% endfor %}
-            {% if not rows or rows|length == 0 %}
-              <tr><td colspan="8" class="text-center text-muted py-4">Niciun rezultat</td></tr>
-            {% endif %}
-          </tbody>
+          <tbody id="orders-tbody"></tbody>
         </table>
       </div>
 
-      <div class="actions-sticky">
-        <button id="markAsPaidButton" class="btn btn-success">
-          <i class="fas fa-check-circle me-1"></i> Marchează ca Plătit (Ramburs)
-        </button>
+      <div class="d-flex justify-content-between align-items-center mt-2">
+        <div id="orders-count" class="small text-muted"></div>
+        <button id="markPaidBtn" class="btn btn-success">✓ Marchează ca Plătit (Ramburs)</button>
       </div>
     </div>
   </div>
-
 </div>
 {% endblock %}
 
