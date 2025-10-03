@@ -20,6 +20,9 @@ import logging
 from routes.financials import router as financials_router
 
 from routes.couriers_profiles_full import settings_router as couriers_router
+from routes.financials import router as financials_router
+
+
 
 
 # Optional: close shared HTTP client used by courier services
@@ -35,6 +38,8 @@ app = FastAPI(
 )
 
 app.include_router(couriers_router)
+app.include_router(financials_router, tags=["Financials"])
+
 
 
 logging.basicConfig(level=logging.INFO)
@@ -118,5 +123,3 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
-
-app.include_router(financials_router)

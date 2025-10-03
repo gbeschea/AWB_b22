@@ -3,7 +3,7 @@
 from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import select
+from sqlalchemy import and_, desc, select, null, func
 from typing import List, Dict
 
 

@@ -14,6 +14,11 @@ from services import shopify_service, address_service, courier_service
 from websocket_manager import manager
 from database import AsyncSessionLocal
 
+from services.couriers.dpd import extract_latest_from_dpd, dpd_payload
+
+normalized, raw, when = extract_latest_from_dpd(dpd_payload)
+
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
@@ -166,7 +171,7 @@ async def _process_and_insert_orders_in_batches(
                         "fulfillment_created_at": _dt(f.get("createdAt")),
                         "awb": number,
                         "courier": (info or {}).get("company") or "Unknown",
-                        "last_status": f.get("displayStatus"),
+                        "last_status": None,
                         "account_key": _normalize_account_key((info or {}).get("company")),
                     }
                 )
