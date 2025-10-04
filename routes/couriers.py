@@ -20,6 +20,8 @@ from sqlalchemy.exc import IntegrityError
 
 
 
+
+
 # Router pentru pagina de setări (formulare HTML)
 settings_router = APIRouter(prefix='/settings/couriers', tags=['Settings - Couriers'])
 # Router pentru endpoint-urile de date (API pentru JavaScript)
@@ -94,6 +96,14 @@ async def handle_create_courier_account_form(
             "username": form_data.get("sameday_username"),
             "password": form_data.get("sameday_password")
         }
+    elif courier_type == 'packeta':
+        credentials_dict["api"] = {
+            "api_key": form_data.get("packeta_api_key"),
+            "api_password": form_data.get("packeta_api_password"),
+        }
+        if form_data.get("packeta_base_url"):
+            credentials_dict["base_url"] = form_data.get("packeta_base_url")
+
     elif courier_type == 'econt':
         credentials_dict["api"] = {
             "username": form_data.get("econt_username"),
@@ -176,51 +186,79 @@ async def get_edit_courier_account_page(
     context = {"request": request, "account": account}
     return templates.TemplateResponse("settings_couriers_edit.html", context)
 
-
 @settings_router.post("/accounts/{account_id}/edit", name="handle_edit_courier_account_form")
 async def handle_edit_courier_account_form(
     account_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Procesează datele din formular și cheamă funcția existentă din CRUD pentru a salva.
-    """
-    form_data = await request.form()
-    
-    # Preia contul existent pentru a putea păstra valorile vechi (ex: parola)
-    account_to_update = await db.get(models.CourierAccount, account_id)
-    if not account_to_update:
+    # 1) Load account
+    res = await db.execute(select(models.CourierAccount).where(models.CourierAccount.id == account_id))
+    account = res.scalar_one_or_none()
+    if not account:
         raise HTTPException(status_code=404, detail="Contul de curier nu a fost găsit.")
 
-    # Reconstruim dicționarul de credențiale, păstrând ce e vechi și adăugând ce e nou
-    updated_credentials = account_to_update.credentials or {}
-    updated_credentials['sender_address'] = {
-        "contact_person": form_data.get("contact_name"),
-        "phone": form_data.get("phone"), "email": form_data.get("email"),
-        "street": form_data.get("address_line1"), "city": form_data.get("city"),
-        "county": form_data.get("county"), "postal_code": form_data.get("postcode")
-    }
-    
-    # Actualizează parola doar dacă a fost introdusă una nouă
-    new_password = form_data.get("dpd_password")
-    if new_password:
-        if 'api' not in updated_credentials: updated_credentials['api'] = {}
-        updated_credentials['api']['password'] = new_password
+    # 2) Read form
+    form = await request.form()
+    courier_type = (form.get("courier_type") or "").lower()
+    name = (form.get("name") or "").strip()
+    account_key = (form.get("account_key") or "").strip()
 
-    # Apelăm funcția ta existentă din CRUD
-    await crud.update_courier_account(
-        db=db,
-        account_id=account_id,
-        name=form_data.get("name"),
-        account_key=form_data.get("account_key"),
-        courier_type=form_data.get("courier_type"),
-        tracking_url=account_to_update.tracking_url,  # Păstrăm tracking_url-ul vechi, deoarece nu e în formular
-        credentials_dict=updated_credentials,
-        is_active=account_to_update.is_active # Păstrăm statusul de activare
-    )
-    
+    # 3) Build credentials
+    updated_credentials = dict(account.credentials or {})
+    sender_address = {
+        "contact_person": (form.get("contact_name") or "").strip(),
+        "phone": (form.get("phone") or "").strip(),
+        "email": (form.get("email") or "").strip(),
+        "street": (form.get("address_line1") or "").strip(),
+        "city": (form.get("city") or "").strip(),
+        "county": (form.get("county") or "").strip(),
+        "postal_code": (form.get("postcode") or "").strip(),
+    }
+    updated_credentials["sender_address"] = sender_address
+
+    api = dict(updated_credentials.get("api") or {})
+    if courier_type == "packeta":
+        # curățăm chei DPD și dublura 'password'
+        for k in ("username", "client_id", "password"):
+            api.pop(k, None)
+
+        pk = (form.get("packeta_api_key") or "").strip()
+        pw = (form.get("packeta_api_password") or "").strip()
+        bu = (form.get("packeta_base_url") or "").strip()
+
+        if pk:
+            api["api_key"] = pk              # util ulterior pentru pickup points
+        if pw:
+            api["api_password"] = pw         # SINGURA parolă păstrată
+        if bu:
+            updated_credentials["base_url"] = bu
+    elif courier_type == "dpd":
+        # curăță cheile Packeta
+        for k in ("api_key", "api_password"):
+            api.pop(k, None)
+        user = (form.get("dpd_username") or "").strip()
+        pw   = (form.get("dpd_password") or "").strip()
+        cid  = (form.get("dpd_client_id") or "").strip()
+        if user:
+            api["username"] = user
+        if pw:
+            api["password"] = pw
+        if cid:
+            api["client_id"] = cid
+
+    updated_credentials["api"] = api
+
+    # 4) Persist prin ORM
+    account.name = name or account.name
+    account.account_key = account_key or account.account_key
+    account.courier_type = courier_type or account.courier_type
+    account.credentials = updated_credentials
+    await db.commit()
+
+    # 5) Redirect
     return RedirectResponse(url=settings_router.url_path_for("get_couriers_page"), status_code=303)
+
 
 
 @settings_router.get("/profiles/{profile_id}/edit", name="edit_shipment_profile_page")

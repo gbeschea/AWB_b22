@@ -21,6 +21,7 @@ from routes.financials import router as financials_router
 
 from routes.couriers_profiles_full import settings_router as couriers_router
 from routes.financials import router as financials_router
+from routes.couriers import settings_router as couriers_settings_router, data_router as couriers_data_router
 
 
 
@@ -40,6 +41,8 @@ app = FastAPI(
 app.include_router(couriers_router)
 app.include_router(financials_router, tags=["Financials"])
 
+app.include_router(couriers_settings_router)
+app.include_router(couriers_data_router)
 
 
 logging.basicConfig(level=logging.INFO)
