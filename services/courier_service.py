@@ -48,25 +48,37 @@ async def track_and_update_shipments(db: AsyncSession, full_sync: bool = False, 
     
     for (courier_name, account_key), shipments_group in grouped_shipments.items():
         try:
-            courier_service_instance = get_courier_service(courier_name)
+            # detectează serviciul folosind ÎNTÂI account_key
+            lookup = f"{account_key or ''} {courier_name or ''}"
+            courier_service_instance = (
+                get_courier_service(lookup)
+                or get_courier_service(account_key or "")
+                or get_courier_service(courier_name or "")
+            )
             if not courier_service_instance:
                 logger.warning(f"Nu s-a găsit serviciu pentru curierul '{courier_name}' (cont: {account_key})")
                 continue
 
             logger.info(f"Procesare {len(shipments_group)} AWB-uri pentru {courier_name} (cont: {account_key})...")
-            
+
             for shipment in shipments_group:
-                response = await courier_service_instance.track_awb(db, shipment.awb, shipment.account_key)
-                
+                # IMPORTANT: trecem account_key la track_awb
+                response = await courier_service_instance.track_awb(db, shipment.awb, account_key)
                 if response and response.status and response.status != shipment.last_status:
                     logger.info(f"Status nou pentru AWB {shipment.awb} ({courier_name}): '{shipment.last_status}' -> '{response.status}'")
                     shipment.last_status = response.status
                     shipment.last_status_at = response.date
                     updated_count += 1
-                await asyncio.sleep(0.3) 
+                await asyncio.sleep(0.2)  # limitare API
+
+            # reduce deadlock: comite pe fiecare grup
+            await db.commit()
 
         except Exception as e:
+            # dacă un grup eșuează, nu bloca restul
+            await db.rollback()
             logger.error(f"Eroare la procesarea grupului pentru {courier_name} / {account_key}: {e}", exc_info=True)
+
 
     if updated_count > 0:
         logger.info(f"COURIER SYNC: Se salvează {updated_count} statusuri noi în baza de date...")

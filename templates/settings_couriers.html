@@ -35,6 +35,7 @@
                             <option value="" disabled selected>Alege tipul</option>
                             <option value="sameday">Sameday</option>
                             <option value="dpd">DPD</option>
+                            <option value="packeta">Packeta</option>
                             <option value="econt">Econt</option>
                         </select>
                     </div>
@@ -87,6 +88,12 @@
                     <input type="password" name="dpd_password" placeholder="DPD Password">
                     <input type="text" name="dpd_client_id" placeholder="DPD Client ID">
                 </div>
+                <div id="fields-new-packeta" class="courier-fields" style="display:none;">
+                    <input type="text" name="packeta_api_key" placeholder="Packeta API Key">
+                    <input type="password" name="packeta_api_password" placeholder="Packeta API Password">
+                    <input type="text" name="packeta_base_url" placeholder="Base URL (opțional, default https://api.packeta.com)">
+                </div>
+
                 <div id="fields-new-econt" class="courier-fields" style="display:none;">
                     <input type="text" name="econt_username" placeholder="Econt Username">
                     <input type="password" name="econt_password" placeholder="Econt Password">

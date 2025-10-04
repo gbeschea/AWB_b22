@@ -26,6 +26,7 @@
                         <select name="courier_type" required>
                             <option value="dpd" {% if account.courier_type == 'dpd' %}selected{% endif %}>DPD</option>
                             <option value="sameday" {% if account.courier_type == 'sameday' %}selected{% endif %}>Sameday</option>
+                            <option value="packeta" {% if account.courier_type == 'packeta' %}selected{% endif %}>Packeta</option>
                         </select>
                     </div>
                 </div>
@@ -44,10 +45,32 @@
                 </div>
             </fieldset>
             <fieldset><legend>Credențiale API (lasă gol pentru a nu schimba parola)</legend>
+            <div id="fields-edit-dpd" class="courier-fields">
                 <input type="text" name="dpd_username" value="{{ api_creds.get('username', '') }}" placeholder="Username DPD">
                 <input type="password" name="dpd_password" placeholder="Parolă nouă DPD (opțional)">
                 <input type="text" name="dpd_client_id" value="{{ api_creds.get('client_id', '') }}" placeholder="Client ID DPD">
+            </div>
+
+            <div id="fields-edit-packeta" class="courier-fields" style="display:none;">
+                <input type="text" name="packeta_api_key" value="{{ api_creds.get('api_key','') }}" placeholder="Packeta API Key">
+                <input type="password" name="packeta_api_password" placeholder="Packeta API Password (nou, opțional)">
+                <input type="text" name="packeta_base_url" value="{{ creds.get('base_url','') }}" placeholder="Base URL (opțional)">
+            </div>
             </fieldset>
+
+            <script>
+            (function(){
+            function showCourierFieldsEdit(val){
+                document.querySelectorAll('.courier-fields').forEach(el => el.style.display='none');
+                var el = document.getElementById('fields-edit-' + val);
+                if(el){ el.style.display='grid'; el.style.gap='1rem'; }
+            }
+            var sel = document.querySelector('select[name="courier_type"]');
+            sel.addEventListener('change', e => showCourierFieldsEdit(e.target.value));
+            showCourierFieldsEdit(sel.value);
+            })();
+            </script>
+
 
             <div class="grid">
                 <button type="submit">Salvează Modificările</button>

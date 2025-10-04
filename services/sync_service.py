@@ -16,6 +16,7 @@ from database import AsyncSessionLocal
 
 from services.couriers.dpd import extract_latest_from_dpd, dpd_payload
 
+
 normalized, raw, when = extract_latest_from_dpd(dpd_payload)
 
 
@@ -71,6 +72,20 @@ def _normalize_account_key(company: Optional[str]) -> str:
     if "sameday" in s:
         return "sameday"
     return s.replace(" ", "")
+
+async def _account_key_from_db(db: AsyncSession, company: Optional[str]) -> Optional[str]:
+    """
+    Caută account_key în tabelul CourierMapping după denumirea curierului din Shopify.
+    """
+    if not company:
+        return None
+    name = company.strip().lower()
+    res = await db.execute(
+        select(models.CourierMapping.account_key).where(models.CourierMapping.shopify_name == name)
+    )
+    row = res.first()
+    return row[0] if row else None
+
 
 
 async def _process_and_insert_orders_in_batches(
@@ -164,17 +179,23 @@ async def _process_and_insert_orders_in_batches(
                 if not number:
                     continue
 
+                company = (info or {}).get("company")
+                ak = await _account_key_from_db(db, company)
+                if not ak:
+                    ak = _normalize_account_key(company)  # fallback dacă nu există mapare în DB
+
                 to_upsert_shipments.append(
                     {
                         "order_id": internal_id,
                         "shopify_fulfillment_id": f["id"].split("/")[-1],
                         "fulfillment_created_at": _dt(f.get("createdAt")),
                         "awb": number,
-                        "courier": (info or {}).get("company") or "Unknown",
+                        "courier": company or "Unknown",
                         "last_status": None,
-                        "account_key": _normalize_account_key((info or {}).get("company")),
+                        "account_key": ak,
                     }
                 )
+
 
         if to_upsert_shipments:
             s_stmt = pg_insert(Shipment).values(to_upsert_shipments)
@@ -292,3 +313,7 @@ async def run_orders_sync(db: AsyncSession, days: int, full_sync: bool = False) 
 
 async def run_couriers_sync(db: AsyncSession, full_sync: bool = False) -> None:
     await courier_service.track_and_update_shipments(db, full_sync=full_sync)
+
+async def run_full_sync(db: AsyncSession, days: int):
+    await run_orders_sync(db, days, full_sync=True)
+    await run_couriers_sync(db, full_sync=True)
