@@ -1,44 +1,75 @@
-# /services/couriers/base.py
+# services/couriers/base.py
 from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Dict, Optional
+
 import httpx
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+
 import models
 
+
+@dataclass
 class TrackingResponse:
-    def __init__(self, status: str, date: Optional[datetime], raw_data: Optional[Dict] = None):
-        self.status = status
-        self.date = date
-        self.raw_data = raw_data
+    status_raw: Optional[str] = None      # text brut de la curier
+    code: Optional[str] = None            # ex: AWB
+    extra: Optional[Dict[str, Any]] = None
+    status: Optional[str] = None
+    date: Optional[datetime] = None
+    success: bool = True
+    raw_data: Optional[Any] = None
+
+
+
+@dataclass
+class LabelResponse:
+    success: bool
+    message: Optional[str] = None
+    label_pdf: Optional[bytes] = None
+    label_mime: Optional[str] = "application/pdf"
+    extra: Optional[Dict[str, Any]] = None
+
 
 class BaseCourier(ABC):
-    def __init__(self, client: httpx.AsyncClient):
-        self.client = client
+    """
+    Bază comună pentru curieri.
+    - self.http: httpx.AsyncClient (nume preferat)
+    - self.client: alias pentru compatibilitate cu cod existent
+    """
+
+    name: str
+    display_name: str
+
+    def __init__(self, http: httpx.AsyncClient) -> None:
+        self.http = http
+        self.client = http  # compat
+
+    # Lăsăm semnături largi ca să nu stricăm implementările existente.
+    @abstractmethod
+    async def track_awb(self, *args, **kwargs) -> TrackingResponse:
+        ...
 
     @abstractmethod
-    async def create_awb(self, *args, **kwargs) -> Dict[str, Any]:
-        raise NotImplementedError
+    async def create_awb(self, *args, **kwargs) -> Any:
+        ...
 
     @abstractmethod
-    async def track_awb(self, db: AsyncSession, awb: str, account_key: Optional[str]) -> TrackingResponse:
-        raise NotImplementedError
+    async def get_label(self, *args, **kwargs) -> Any:
+        ...
 
-    @abstractmethod
-    async def get_label(self, awb: str, creds: dict, paper_size: str) -> bytes:
-        raise NotImplementedError
-
-    async def get_credentials(self, db: AsyncSession, account_key: Optional[str]) -> dict:
+    async def get_credentials(self, db: AsyncSession, account_key: Optional[str]) -> Dict[str, Any]:
         """
-        Caută credențialele după:
-        1) match exact pe account_key
-        2) normalizări (lower/upper, '-' <-> '_')
-        3) aliasuri uzuale pe vendor (ex: 'dpd' -> dpdromania/dpd-ro/dpd_jg/dpd_px)
-        4) fallback: primul cont cu prefix de vendor (dpd% / sameday%)
+        Returnează credențialele contului după:
+          1) match exact pe account_key
+          2) normalizări (lower/upper, '-' <-> '_')
+          3) aliasuri pe vendor (ex: 'dpd' -> dpdromania/dpd-ro/dpd_jg/dpd_px)
+          4) fallback: primul cont cu prefix de vendor (dpd% / sameday%)
         """
-        from models import CourierAccount
+        from models import CourierAccount  # tipul e în models
 
         def norms(k: str) -> list[str]:
             k = (k or "").strip()
@@ -60,13 +91,17 @@ class BaseCourier(ABC):
             if acc and acc.credentials:
                 return acc.credentials
 
-        # 3) aliasuri de vendor
+        # 3) aliasuri vendor
         ak = (account_key or "").strip().lower()
         vendor_aliases: list[str] = []
         if ak.startswith("dpd"):
             vendor_aliases = ["dpdromania", "dpd-ro", "dpd_jg", "dpd-jg", "dpd_px", "dpd-px", "dpd"]
         elif ak.startswith("sameday"):
             vendor_aliases = ["sameday"]
+        elif ak.startswith("packeta"):
+            vendor_aliases = ["packeta", "czpacketahomehd", "plhomedeliveryhd", "cz-packeta", "pl-packeta"]
+        elif ak.startswith("econt"):
+            vendor_aliases = ["econt"]
 
         for alias in vendor_aliases:
             for k in norms(alias):
@@ -76,14 +111,28 @@ class BaseCourier(ABC):
                     return acc.credentials
 
         # 4) fallback pe prefix
-        prefix = "dpd%" if ak.startswith("dpd") else ("sameday%" if ak.startswith("sameday") else None)
+        prefix = None
+        if ak.startswith("dpd"):
+            prefix = "dpd%"
+        elif ak.startswith("sameday"):
+            prefix = "sameday%"
+        elif ak.startswith("packeta"):
+            prefix = "packeta%"
+        elif ak.startswith("econt"):
+            prefix = "econt%"
+
         if prefix:
-            stmt = select(CourierAccount).where(
-                and_(CourierAccount.account_key.ilike(prefix), CourierAccount.credentials.isnot(None))
-            ).limit(1)
+            stmt = (
+                select(CourierAccount)
+                .where(and_(CourierAccount.account_key.ilike(prefix), CourierAccount.credentials.isnot(None)))
+                .limit(1)
+            )
             res = await db.execute(stmt)
             acc = res.scalar_one_or_none()
             if acc and acc.credentials:
                 return acc.credentials
 
         raise ValueError(f"Nu s-au găsit credențiale pentru contul '{account_key}'")
+
+
+__all__ = ["BaseCourier", "TrackingResponse", "LabelResponse"]

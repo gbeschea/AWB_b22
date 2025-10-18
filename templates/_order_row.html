@@ -10,8 +10,9 @@
 <tr class="order-row-main" data-order-id="{{ order.id }}">
     <td data-column-key="selector"><input type="checkbox" class="awb-checkbox" value="{{ awb }}" {% if not awb %}disabled{% endif %}></td>
     <td data-column-key="comanda">
-        <a href="https://{{ order.store.domain if order.store }}/admin/orders/{{ order.shopify_id }}" target="_blank" title="Vezi în Shopify">{{ order.name }}</a><br>
-        <small>{{ order.store.name if order.store else 'N/A' }}</small>
+    <a href="https://admin.shopify.com/store/{{ order.store.shopify_admin_slug }}/orders/{{ order.shopify_order_id }}"
+        target="_blank" rel="noopener">{{ order.name }}</a>
+    <div class="sub">{{ order.store.name }}</div>
     </td>
     <td data-column-key="data"><small>{{ (order.created_at | localtime).strftime('%d-%m-%y %H:%M') if order.created_at }}</small></td>
     <td data-column-key="status"><span class="status-badge status-{{ status_text | slugify }}">{{ status_text }}</span></td>
@@ -22,7 +23,19 @@
             {% if order.line_items %}{{ order.line_items[0].quantity }}x {{ order.line_items[0].title | truncate(30) }}{% if order.line_items|length > 1 %} (+{{ order.line_items|length - 1 }}){% endif %}{% else %}-{% endif %}
         </small>
     </td>
-    <td data-column-key="awb"><small>{{ awb }}</small></td>
+    <td data-column-key="awb">
+    {% set sh = order.shipments|sort(attribute='last_status_at')|last %}
+    {% if sh and sh.awb %}
+        {% if sh.account and sh.account.tracking_url_template %}
+        <a href="{{ sh.account.tracking_url_template.replace('{awb}', sh.awb) }}"
+            target="_blank" rel="noopener">{{ sh.awb }}</a>
+        {% else %}
+        {{ sh.awb }}
+        {% endif %}
+    {% else %}
+        -
+    {% endif %}
+    </td>
     <td data-column-key="status_curier"><small>{{ order.mapped_courier_status or '' }}</small></td>
     <td data-column-key="printat"><small>{{ 'Da' if (latest_shipment and latest_shipment.printed_at) else 'Nu' }}</small></td>
     <td data-column-key="printat_la"><small>{{ (latest_shipment.printed_at | localtime).strftime('%d-%m-%y %H:%M') if latest_shipment and latest_shipment.printed_at }}</small></td>

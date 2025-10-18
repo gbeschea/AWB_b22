@@ -66,14 +66,7 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     el('syncCouriersButton')?.addEventListener('click', () => startMainPageSync('/sync/couriers', new FormData()));
 
-    // ---- Filtre & sort ----
-    let debounceTimeout;
-    const submitFilterForm = () => { clearTimeout(debounceTimeout); mainPageContainer.submit(); };
-    mainPageContainer.querySelectorAll('select, input[type="date"]').forEach(elm => elm.addEventListener('change', submitFilterForm));
-    mainPageContainer.querySelectorAll('input[type="text"]').forEach(elm => elm.addEventListener('keyup', () => {
-      clearTimeout(debounceTimeout);
-      debounceTimeout = setTimeout(submitFilterForm, 500);
-    }));
+    
 
     // ---- Toggle detalii compact/detaliat ----
     const globalToggleButton = el('toggle-detailed-view');
