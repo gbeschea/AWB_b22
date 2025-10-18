@@ -34,18 +34,18 @@ class PacketaCourier(BaseCourier):
 
     async def track_awb(self, db: AsyncSession, awb: str, account_key: Optional[str]) -> TrackingResponse:
         if not account_key:
-            return TrackingResponse(status="Fără account_key", date=None)
+            return TrackingResponse(success=False, status="Fără account_key", date=None, code=awb)
 
         acct = await self._get_account(db, account_key)
         if not acct or not acct.credentials:
-            return TrackingResponse(status="Cont inexistent", date=None)
+            return TrackingResponse(success=False, status="Cont inexistent", date=None, code=awb)
 
         creds: Dict[str, Any] = acct.credentials or {}
         api = creds.get("api", {}) or {}
         # Packeta folosește apiPassword; lăsăm fallback pe 'password' dacă există din versiuni vechi
         api_password = api.get("api_password") or api.get("password")
         if not api_password:
-            return TrackingResponse(status="Lipsește api_password", date=None)
+            return TrackingResponse(success=False, status="Lipsește api_password", date=None, code=awb)
 
         # Body XML <packetTracking>
         root = Element("packetTracking")
@@ -63,7 +63,7 @@ class PacketaCourier(BaseCourier):
         try:
             r = await self.client.post(base_url, content=xml_body, headers=headers, timeout=30.0)
             if r.status_code != 200:
-                return TrackingResponse(status=f"HTTP {r.status_code}", date=None)
+                return TrackingResponse(success=False, status=f"HTTP {r.status_code}", date=None, code=awb)
 
             txt = r.text or ""
 
@@ -72,7 +72,15 @@ class PacketaCourier(BaseCourier):
                 i, j = txt.find(a), txt.find(b)
                 return txt[i + len(a): j].strip() if i != -1 and j != -1 and j > i else None
 
-            status = xtag("statusCode") or xtag("codeText") or xtag("status") or xtag("description") or "Unknown"
+            status = (
+                xtag("codeText")
+                or xtag("statusText")
+                or xtag("description")
+                or xtag("status")
+                or xtag("statusCode")
+                or "Unknown"
+            )
+
             ts = xtag("eventTime") or xtag("date")
             dt: Optional[datetime] = None
             if ts:
@@ -81,11 +89,12 @@ class PacketaCourier(BaseCourier):
                 except Exception:
                     dt = None
 
-            return TrackingResponse(status=status, date=dt, raw_data={"xml": txt})
+            return TrackingResponse(success=True, status=status, date=dt, code=awb, extra={"xml": txt})
+
 
         except Exception as e:
             log.error(f"Packeta tracking error {awb}: {e}", exc_info=True)
-            return TrackingResponse(status="Eroare tracking Packeta", date=None)
+            return TrackingResponse(success=False, status="Eroare tracking Packeta", date=None, code=awb)
 
     async def create_awb(self, db: AsyncSession, order: models.Order, account_key: str) -> Dict[str, Any]:
         raise NotImplementedError("Packeta.create_awb neimplementat.")

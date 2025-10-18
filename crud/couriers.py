@@ -1,80 +1,152 @@
-import json
-import logging
-from sqlalchemy.ext.asyncio import AsyncSession
+# crud/couriers.py
+from __future__ import annotations
+
+from typing import Optional, Dict, Any, List
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+
 import models
-from typing import List
 
 
-async def get_courier_accounts(db: AsyncSession):
-    """Preia toate conturile de curieri din baza de date."""
-    result = await db.execute(select(models.CourierAccount).options(selectinload(models.CourierAccount.mappings)))
-    return result.scalars().all()
+# ============ Courier Accounts ============
 
-async def get_courier_mappings(db: AsyncSession):
-    """Preia toate mapările de curieri din baza de date."""
-    result = await db.execute(select(models.CourierMapping))
-    return result.scalars().all()
+async def get_courier_accounts(db: AsyncSession) -> List[models.CourierAccount]:
+    res = await db.execute(
+        select(models.CourierAccount)
+        .options(selectinload(models.CourierAccount.mappings))
+        .order_by(models.CourierAccount.name)
+    )
+    return res.scalars().all()
 
-async def create_courier_account(db: AsyncSession, name: str, account_key: str, courier_type: str, tracking_url: str, credentials_dict: dict):
-    """Creează un nou cont de curier."""
-    new_account = models.CourierAccount(
+
+async def get_courier_account_by_key(db: AsyncSession, account_key: str) -> Optional[models.CourierAccount]:
+    res = await db.execute(
+        select(models.CourierAccount).where(models.CourierAccount.account_key == account_key)
+    )
+    return res.scalar_one_or_none()
+
+
+async def create_courier_account(
+    db: AsyncSession,
+    name: str,
+    account_key: str,
+    courier_type: str,
+    credentials_dict: Optional[Dict[str, Any]] = None,
+    tracking_url: Optional[str] = None,
+    is_active: bool = True,
+) -> models.CourierAccount:
+    acc = models.CourierAccount(
+        name=name.strip(),
+        account_key=account_key.strip(),
+        courier_type=courier_type.strip(),
+        tracking_url=(tracking_url or None),
+        credentials=(credentials_dict or {}),
+        is_active=is_active,
+    )
+    db.add(acc)
+    await db.commit()
+    await db.refresh(acc)
+    return acc
+
+
+async def update_courier_account(
+    db: AsyncSession,
+    account_id: int,
+    name: str,
+    account_key: str,
+    courier_type: str,
+    credentials_dict: Optional[Dict[str, Any]] = None,
+    tracking_url: Optional[str] = None,
+    is_active: bool = True,
+) -> Optional[models.CourierAccount]:
+    res = await db.execute(
+        select(models.CourierAccount).where(models.CourierAccount.id == account_id)
+    )
+    acc = res.scalar_one_or_none()
+    if not acc:
+        return None
+
+    acc.name = name.strip()
+    acc.account_key = account_key.strip()
+    acc.courier_type = courier_type.strip()
+    acc.tracking_url = tracking_url or None
+    acc.is_active = bool(is_active)
+
+    # păstrează secretele dacă nu vin în request
+    keep_keys = {"password", "api_password", "token", "api_key", "secret"}
+    existing = acc.credentials or {}
+    new_creds = dict(credentials_dict or {})
+    for k in keep_keys:
+        if not new_creds.get(k) and k in existing:
+            new_creds[k] = existing[k]
+    existing.update({k: v for k, v in new_creds.items() if v is not None})
+    acc.credentials = existing
+
+    await db.commit()
+    await db.refresh(acc)
+    return acc
+
+
+async def upsert_courier_account(
+    db: AsyncSession,
+    *,
+    account_key: str,
+    name: str,
+    courier_type: str,
+    credentials: Optional[Dict[str, Any]] = None,
+    tracking_url: Optional[str] = None,
+    is_active: bool = True,
+) -> models.CourierAccount:
+    acc = await get_courier_account_by_key(db, account_key)
+    if acc is None:
+        return await create_courier_account(
+            db,
+            name=name,
+            account_key=account_key,
+            courier_type=courier_type,
+            credentials_dict=credentials,
+            tracking_url=tracking_url,
+            is_active=is_active,
+        )
+
+    return await update_courier_account(
+        db,
+        account_id=acc.id,
         name=name,
         account_key=account_key,
         courier_type=courier_type,
+        credentials_dict=credentials,
         tracking_url=tracking_url,
-        credentials=credentials_dict,
-        is_active=True
+        is_active=is_active,
     )
-    db.add(new_account)
+
+
+# ============ Courier Mappings ============
+
+async def get_courier_mappings(db: AsyncSession) -> List[models.CourierMapping]:
+    res = await db.execute(select(models.CourierMapping).order_by(models.CourierMapping.id))
+    return res.scalars().all()
+
+
+async def create_courier_mapping(db: AsyncSession, shopify_name: str, account_key: str) -> models.CourierMapping:
+    m = models.CourierMapping(
+        shopify_name=shopify_name.strip(),
+        account_key=account_key.strip(),
+    )
+    db.add(m)
     await db.commit()
+    await db.refresh(m)
+    return m
 
-async def update_courier_account(
-    db: AsyncSession, account_id: int, name: str, account_key: str,
-    courier_type: str, tracking_url: str, credentials_dict: dict, is_active: bool
-):
-    """Actualizează un cont de curier existent."""
-    result = await db.execute(select(models.CourierAccount).where(models.CourierAccount.id == account_id))
-    account = result.scalar_one_or_none()
-    
-    if account:
-        account.name = name
-        account.account_key = account_key
-        account.courier_type = courier_type
-        account.tracking_url = tracking_url
-        account.is_active = is_active
-        
-        # Logica de actualizare a credențialelor
-        existing_creds = account.credentials or {}
-        
-        # Tratăm parola separat: dacă e goală, o păstrăm pe cea veche
-        new_password = credentials_dict.get('password')
-        if not new_password: # Dacă parola e goală sau None
-            if 'password' in existing_creds:
-                credentials_dict['password'] = existing_creds['password']
-        
-        # Actualizăm dicționarul de credențiale
-        existing_creds.update(credentials_dict)
-        account.credentials = existing_creds
-        
-        await db.commit()
-        await db.refresh(account)
 
-async def create_courier_mapping(db: AsyncSession, shopify_name: str, account_key: str):
-    """Creează o nouă mapare de curier."""
-    new_mapping = models.CourierMapping(shopify_name=shopify_name, account_key=account_key)
-    db.add(new_mapping)
-    await db.commit()
+# ============ Aux ============
 
-async def get_courier_categories(db: AsyncSession):
-    """Preia toate categoriile de curieri din baza de date."""
-    result = await db.execute(select(models.CourierCategory))
-    return result.scalars().all()
+async def get_courier_categories(db: AsyncSession) -> List[models.CourierCategory]:
+    res = await db.execute(select(models.CourierCategory).order_by(models.CourierCategory.name))
+    return res.scalars().all()
+
 
 async def get_all_shipment_profiles(db: AsyncSession) -> List[models.ShipmentProfile]:
-    """Preia toate profilele de expediere din baza de date."""
-    result = await db.execute(
-        select(models.ShipmentProfile).order_by(models.ShipmentProfile.name)
-    )
-    return result.scalars().all()
+    res = await db.execute(select(models.ShipmentProfile).order_by(models.ShipmentProfile.name))
+    return res.scalars().all()
