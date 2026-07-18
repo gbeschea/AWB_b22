@@ -6,6 +6,7 @@ from .sameday import SamedayCourier
 from .packeta import PacketaCourier  # NEW
 from .econt import EcontCourier
 from .fancourier import FanCourier
+from .gls import GLSCourier
 
 
 
@@ -22,6 +23,7 @@ _courier_instances = {
     "econt": EcontCourier(_http_client),
     "fancourier": _fancourier,
     "fan": _fancourier,  # alias
+    "gls": GLSCourier(_http_client),
 }
 
 _courier_instances.update({
