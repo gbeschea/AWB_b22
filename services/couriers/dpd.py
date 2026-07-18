@@ -644,6 +644,40 @@ class DPDCourier(BaseCourier):
         except Exception as e:
             raise RuntimeError(f"Eroare la descărcarea etichetei DPD: {e}")
 
+    async def request_pickup(self, db: AsyncSession, awbs, account_key: Optional[str] = None,
+                             *, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Request a DPD courier pickup (POST /pickup). Creating a shipment with a pickupDate
+        does NOT schedule collection — this formally requests the courier. `awbs` = the DPD
+        shipment id(s) returned at creation."""
+        opts = options or {}
+        try:
+            creds = await self.get_credentials(db, account_key)
+        except ValueError:
+            return {"supported": True, "requested": False, "message": "DPD: lipsesc credențialele."}
+        awb_list = [awbs] if isinstance(awbs, str) else [a for a in (awbs or []) if a]
+        body = {
+            "userName": creds.get("username") or creds.get("userName"),
+            "password": creds.get("password"),
+            "language": "EN",
+            "pickupScope": "EXPLICIT_SHIPMENT_ID_LIST",
+            "explicitShipmentIdList": [str(a) for a in awb_list],
+            "autoAdjustPickupDate": True,
+            "visitEndTime": opts.get("pickup_to") or "17:00",
+        }
+        if opts.get("pickup_datetime"):
+            body["pickupDateTime"] = opts["pickup_datetime"]
+        try:
+            r = await self.client.post(f"{DPD_BASE_URL}/pickup", json=body,
+                                       headers={"Accept": "application/json"}, timeout=30.0)
+            data = r.json() if r.content else {}
+        except Exception as e:
+            return {"supported": True, "requested": False, "message": f"DPD pickup eroare: {e}"}
+        err = data.get("error") if isinstance(data, dict) else None
+        if r.status_code < 400 and not err:
+            return {"supported": True, "requested": True, "order": data}
+        msg = (err or {}).get("message") if isinstance(err, dict) else (err or f"HTTP {r.status_code}")
+        return {"supported": True, "requested": False, "message": str(msg) or r.text[:200]}
+
     async def void_awb(self, db: AsyncSession, awb: str, account_key: Optional[str] = None) -> VoidResponse:
         """Cancel a DPD shipment (POST /shipment/cancel). DPD only allows cancel while the
         shipment is not yet ordered for pickup; empty JSON = success."""

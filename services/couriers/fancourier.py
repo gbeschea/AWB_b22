@@ -136,6 +136,54 @@ class FanCourier(BaseCourier):
             raise RuntimeError(f"FAN Courier: răspuns fără awbNumber: {data}")
         return {"awb": str(awb), "raw": first, "label_available": True}
 
+    @staticmethod
+    def _next_business_day() -> str:
+        from datetime import datetime, timedelta
+        d = datetime.now()
+        if d.hour >= 16:  # after the usual cut-off -> next day
+            d += timedelta(days=1)
+        while d.weekday() >= 5:  # skip Sat/Sun
+            d += timedelta(days=1)
+        return d.strftime("%Y-%m-%d")
+
+    async def request_pickup(self, db: AsyncSession, awbs, account_key: Optional[str] = None,
+                             *, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Place a FAN courier order (pickup). FAN requires this separately — an AWB alone is
+        not collected. One order per branch covers all its AWBs (docs), so `awbs` may be a
+        list; we send the count/weight and, for a single AWB, print it on the order."""
+        opts = options or {}
+        creds = await self.get_credentials(db, account_key)
+        token = await self._get_token(creds)
+        if not token:
+            return {"supported": True, "requested": False, "message": "FAN Courier: autentificare eșuată."}
+        client_id = self._client_id(creds)
+        awb_list = [awbs] if isinstance(awbs, str) else [a for a in (awbs or []) if a]
+        parcels = int(opts.get("parcels_count") or max(len(awb_list), 1))
+        weight = float(opts.get("total_weight") or max(len(awb_list), 1))
+        info: Dict[str, Any] = {
+            "packages": {"parcel": parcels, "envelope": 0},
+            "weight": round(weight, 2),
+            "dimensions": {"width": 10, "length": 10, "height": 10},
+            "orderType": opts.get("order_type") or "Standard",
+            "pickupDate": opts.get("pickup_date") or self._next_business_day(),
+            "pickupHours": {"first": opts.get("pickup_from") or "09:00",
+                            "second": opts.get("pickup_to") or "17:00"},
+        }
+        if len(awb_list) == 1:
+            info["awbNumber"] = str(awb_list[0])
+        body = {"info": info, "clientId": int(client_id)}
+        try:
+            r = await self.client.post(f"{self.BASE_URL}/order", json=body,
+                                       headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                                       timeout=30.0)
+            data = r.json() if r.content else {}
+        except Exception as e:
+            return {"supported": True, "requested": False, "message": f"FAN Courier pickup eroare: {e}"}
+        if r.status_code >= 400 or data.get("status") != "success":
+            return {"supported": True, "requested": False,
+                    "message": f"HTTP {r.status_code}: {r.text[:300]}"}
+        return {"supported": True, "requested": True, "order": data.get("data")}
+
     async def get_label(self, awb: str, creds: dict, paper_size: str) -> bytes:
         token = await self._get_token(creds)
         if not token:

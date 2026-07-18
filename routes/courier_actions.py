@@ -103,13 +103,29 @@ async def _create_one(
             "courier": (acct.courier_type or account_key)}
 
 
+async def _request_pickup(db: AsyncSession, store: models.Store, account_key: str,
+                          awbs, options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Ask the courier to collect the AWB(s). No-op for couriers that auto-schedule."""
+    try:
+        acct = await _get_account(db, store, account_key)
+        svc = get_courier_service(acct.courier_type or account_key)
+        if not svc:
+            return {"supported": False}
+        return await svc.request_pickup(db, awbs, account_key, options=options or {})
+    except NotImplementedError:
+        return {"supported": False}
+    except Exception as e:
+        return {"supported": True, "requested": False, "message": str(e)}
+
+
 @router.post("/awb/create")
 async def create_awb(
     payload: Dict[str, Any] = Body(...),
     store: models.Store = Depends(require_shop),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create one AWB. Body: {order_id, account_key, options?}."""
+    """Create one AWB (+ request courier pickup where the courier needs it).
+    Body: {order_id, account_key, options?, request_pickup? (default true)}."""
     order_id = payload.get("order_id")
     account_key = (payload.get("account_key") or "").strip()
     if not order_id or not account_key:
@@ -118,10 +134,13 @@ async def create_awb(
     try:
         r = await _create_one(db, store, order, account_key, payload.get("options"))
         await db.commit()
-        return {"success": True, **r}
     except HTTPException:
         await db.rollback()
         raise
+    pickup = None
+    if payload.get("request_pickup", True):
+        pickup = await _request_pickup(db, store, account_key, r["awb"], payload.get("options"))
+    return {"success": True, **r, "pickup": pickup}
 
 
 @router.post("/awb/bulk")
@@ -152,7 +171,13 @@ async def bulk_create(
         except Exception as e:
             await db.rollback()
             errors.append({"order_id": oid, "error": str(e)})
-    return {"success": bool(created), "created": created, "errors": errors, "total": len(order_ids)}
+
+    # One pickup request covers all AWBs on the account (FAN/DPD docs), not one per AWB.
+    pickup = None
+    if created and payload.get("request_pickup", True):
+        pickup = await _request_pickup(db, store, account_key, [c["awb"] for c in created], options)
+    return {"success": bool(created), "created": created, "errors": errors,
+            "total": len(order_ids), "pickup": pickup}
 
 
 async def _load_shipment(db: AsyncSession, store: models.Store, shipment_id: int) -> models.Shipment:

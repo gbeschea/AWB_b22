@@ -73,6 +73,13 @@ class BaseCourier(ABC):
         ordered). Default: unsupported — adapters override where the API allows it."""
         raise NotImplementedError(f"{self.__class__.__name__}.void_awb not implemented")
 
+    async def request_pickup(self, *args, **kwargs) -> Dict[str, Any]:
+        """Request a courier pickup ("cerere de ridicare") for one or more AWBs. Some couriers
+        (e.g. FAN) require this as a SEPARATE step — the AWB alone isn't collected. Others
+        auto-schedule collection from the AWB's pickup date. Default: not needed."""
+        return {"supported": False, "requested": False,
+                "message": "Ridicarea e programată automat cu AWB-ul (fără cerere separată)."}
+
     async def get_credentials(self, db: AsyncSession, account_key: Optional[str]) -> Dict[str, Any]:
         """
         Returnează credențialele contului după:
