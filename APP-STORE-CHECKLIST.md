@@ -36,9 +36,12 @@ Status of the store-submission requirements. ✅ = done in code, ☐ = needs a h
 - ☐ **Emergency developer contact** — Account settings.
 
 ## Before submit
-- ☐ Deploy to the live HTTPS host; set all env vars (`AWB_B2_ENC_KEY`, `SHOPIFY_*`, `SESSION_SECRET`,
-  `AWB_B2_CORS_ORIGINS`).
-- ☐ Run the multi-tenancy migration (`f1a2b3c4d5e6`) on a DB **copy** first, then prod.
+- ☐ Deploy to the live HTTPS host (`order-hub.syncerp.work` on fleet box `161.97.69.226`); set all env vars
+  (`AWB_B2_ENC_KEY`, `SHOPIFY_*`, `SESSION_SECRET`, `AWB_B2_CORS_ORIGINS`; `DATABASE_URL` from
+  `/root/.order_hub/db.env`).
+- ✅ DB provisioned: own `order_hub` DB + role on the fleet box (like the other 22 apps), direct `:5432`.
+- ☐ Run the migration `f1a2b3c4d5e6` on the box against `order_hub` — **safe to run directly** (brand-new
+  empty DB, no existing data), creates all tables fresh.
 - ☐ `shopify app deploy --client-id=<id>` to register scopes + webhooks on the platform.
 - ☐ Flip `SHOPIFY_BILLING_TEST=false` when ready to charge real money.
 - ☐ Install on a dev store and walk every screen live (the first true end-to-end verification).

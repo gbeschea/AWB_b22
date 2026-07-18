@@ -12,8 +12,10 @@ DATABASE_URL = settings.DATABASE_URL
 engine = create_async_engine(
     DATABASE_URL,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    # Modest pool — Order Hub shares the fleet box's Postgres with ~22 other apps and
+    # connects direct to :5432 (SQLAlchemy pools; avoids asyncpg-vs-PgBouncer issues).
+    pool_size=5,
+    max_overflow=10,
     pool_recycle=1800,
     echo=False,
 )
