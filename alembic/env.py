@@ -22,6 +22,12 @@ from models import Base
 # access to the values within the .ini file in use.
 config = context.config
 
+# The DATABASE_URL env var is AUTHORITATIVE — it targets the app's real DB (order_hub on
+# the fleet box). Never rely on the alembic.ini fallback (it must NOT point at a live DB).
+_env_db_url = os.environ.get("DATABASE_URL")
+if _env_db_url:
+    config.set_main_option("sqlalchemy.url", _env_db_url)
+
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:

@@ -18,3 +18,7 @@ compará
 tests/
 REFACTOR-PLAN.md
 readme.txt
+# frontend: ship the built dist, never node_modules / sources
+frontend/node_modules/
+frontend/src/
+arhiva_printuri/

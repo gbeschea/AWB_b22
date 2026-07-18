@@ -1,11 +1,16 @@
 # main.py
 
 import os
+from urllib.parse import quote
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
+
+from database import get_db
+from crud import stores as crud_stores
 
 from routes import (
     store_categories, printing, logs, orders, sync, labels, actions,
@@ -91,6 +96,24 @@ app.include_router(profiles.api_router)
 # Embedded React/Polaris SPA (served under /app). Mounted last so its /app/{path:path}
 # catch-all doesn't shadow the API/legacy routes above.
 spa_routes.mount_spa(app)
+
+
+@app.get("/", include_in_schema=False)
+async def root_entry(request: Request, db=Depends(get_db)):
+    """Embedded-app entry (Shopify loads the App URL here). Installed shop → the SPA;
+    fresh shop → break out of the iframe and start OAuth."""
+    shop = (request.query_params.get("shop") or "").strip().lower()
+    host = request.query_params.get("host", "")
+    if not shop:
+        return RedirectResponse("/app")
+    store = await crud_stores.get_store_by_domain(db, shop)
+    if store and store.is_active and store.access_token:
+        suffix = f"?shop={quote(shop)}" + (f"&host={quote(host)}" if host else "")
+        return RedirectResponse(f"/app{suffix}")
+    # Not installed → start OAuth. Shopify loads this entry TOP-LEVEL during install, so a
+    # plain 302 works. (Do NOT emit an App Bridge <script> here — outside the admin it
+    # hijacks navigation to the admin app URL and pre-empts the OAuth redirect.)
+    return RedirectResponse(f"/auth/install?shop={quote(shop)}")
 
 
 @app.on_event("startup")
