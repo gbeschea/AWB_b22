@@ -206,11 +206,39 @@ async def upsert_order_from_webhook(
     return order
 
 
+async def handle_order_edited(
+    db: AsyncSession, store: models.Store, payload: Dict[str, Any]
+) -> Optional[models.Order]:
+    """orders/edited fires when a merchant edits an order's LINE ITEMS in the admin.
+    Its payload is only an edit DIFF (additions/removals), not a full order — so we
+    re-fetch the authoritative current state via GraphQL and upsert it (line items,
+    totals, fulfillments all refreshed)."""
+    oe = payload.get("order_edit") or {}
+    order_id = oe.get("order_id") or payload.get("id")
+    if order_id in (None, "", "None"):
+        logger.warning("orders/edited with no order_id for shop=%s; ignored.", store.domain)
+        return None
+
+    # Lazy imports avoid pulling the sync stack in at module load.
+    from services import shopify_service, sync_service
+
+    node = await shopify_service.fetch_single_order(db, store.id, order_id)
+    if not node:
+        logger.warning("orders/edited: could not re-fetch order %s for %s.", order_id, store.domain)
+        return None
+
+    # Reuse the GraphQL-shape upsert (rebuilds line items + shipments + validates address).
+    await sync_service._process_and_insert_orders_in_batches(db, [node], store.id, store.pii_source)
+    logger.info("orders/edited re-synced order %s for shop=%s.", order_id, store.domain)
+    return None
+
+
 # --- dispatch (referenced by routes/webhooks.py) ---------------------------
 
 WEBHOOK_HANDLERS = {
     "orders/create": upsert_order_from_webhook,
     "orders/updated": upsert_order_from_webhook,
+    "orders/edited": handle_order_edited,
 }
 
 

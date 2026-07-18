@@ -41,6 +41,13 @@ def test_normalize_account_key():
     assert w._normalize_account_key("") == "default"
 
 
-def test_both_order_topics_share_the_idempotent_upsert():
+def test_create_and_update_share_the_idempotent_upsert():
     assert w.WEBHOOK_HANDLERS["orders/create"] is w.upsert_order_from_webhook
     assert w.WEBHOOK_HANDLERS["orders/updated"] is w.upsert_order_from_webhook
+
+
+def test_order_edited_uses_the_refetch_handler():
+    # orders/edited payload is a diff, so it must go through the re-fetch handler,
+    # NOT the full-order upsert.
+    assert w.WEBHOOK_HANDLERS["orders/edited"] is w.handle_order_edited
+    assert w.WEBHOOK_HANDLERS["orders/edited"] is not w.upsert_order_from_webhook

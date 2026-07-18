@@ -27,6 +27,23 @@ _SYNC_BACKFILL_DAYS = 30
 _syncing: set = set()
 _sync_tasks: set = set()
 
+# Shops whose webhooks we've already reconciled this process lifetime (resets on restart,
+# so a deploy re-verifies each shop on its next load — cheap self-heal).
+_wh_ensured: set = set()
+
+
+async def _ensure_webhooks_bg(store_id: int):
+    """Reconcile operational webhooks for a shop out-of-band (own DB session)."""
+    try:
+        from database import AsyncSessionLocal
+        from services import shopify_service
+        async with AsyncSessionLocal() as db:
+            store = await db.get(models.Store, store_id)
+            if store and store.is_active and store.access_token:
+                await shopify_service.ensure_operational_webhooks(store)
+    except Exception:
+        _logger.exception("Webhook reconcile failed for store_id=%s", store_id)
+
 
 # --- Fleet-convention endpoints (mirror @studio/core api.health / api.vitals) ---
 # Unauthenticated: health checks + web-vitals beacons don't carry a session token.
@@ -50,7 +67,14 @@ async def vitals(request: Request):
 
 @router.get("/me")
 async def me(store: models.Store = Depends(require_shop)):
-    """Shop context for the embedded app shell (who am I, what's my plan)."""
+    """Shop context for the embedded app shell (who am I, what's my plan).
+    Also self-heals webhook registration once per shop per process — repairs any that
+    failed at install (e.g. before PCD was granted) without needing a reinstall."""
+    if store.domain not in _wh_ensured:
+        _wh_ensured.add(store.domain)
+        t = asyncio.create_task(_ensure_webhooks_bg(store.id))
+        _sync_tasks.add(t)
+        t.add_done_callback(_sync_tasks.discard)
     return {
         "shop": store.domain,
         "name": store.name,

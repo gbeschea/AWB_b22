@@ -1,13 +1,14 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import Dict, Any, List, Union
+from typing import Dict, Any, List, Optional, Union
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 import models
+from settings import settings
 
 _logger = logging.getLogger(__name__)
 
@@ -73,51 +74,48 @@ async def get_store_from_db(db: AsyncSession, store_id: int) -> models.Store:
     return store
 
 
+def _order_node_fields(include_pii: bool) -> str:
+    """The order node fields we ingest — shared by the list query and the single-order
+    re-fetch (orders/edited). We deliberately DON'T request the linked `customer` object:
+    it needs the read_customers scope (+ PCD Email) and makes the whole query ACCESS_DENIED.
+    For shipping/AWB the recipient IS the shipping address, so the name is derived from
+    shippingAddress (covered by read_orders + the PCD Name/Phone/Address grant)."""
+    fields = """
+        id
+        name
+        createdAt
+        displayFinancialStatus
+        displayFulfillmentStatus
+        tags
+        note
+        totalPriceSet { shopMoney { amount currencyCode } }
+        paymentGatewayNames
+        fulfillments {
+          id
+          createdAt
+          displayStatus
+          trackingInfo { company number url }
+        }
+    """
+    if include_pii:
+        fields += """
+        shippingAddress {
+          firstName lastName address1 address2 city province zip country phone
+        }
+        """
+    return fields
+
+
 def _orders_query(include_pii: bool) -> str:
-    """
-    Construiește query-ul GraphQL. Când include_pii=False, nu cerem câmpuri care
-    au nevoie de access la obiectul Customer (evităm ACCESS_DENIED).
-    """
-    base = """
+    """Paginated list query used by the backfill."""
+    return """
     query($first: Int!, $cursor: String, $query: String) {
       orders(first: $first, after: $cursor, query: $query) {
         pageInfo { hasNextPage endCursor }
-        edges {
-          node {
-            id
-            name
-            createdAt
-            displayFinancialStatus
-            displayFulfillmentStatus
-            tags
-            note
-            totalPriceSet { shopMoney { amount currencyCode } }
-            paymentGatewayNames
-            fulfillments {
-              id
-              createdAt
-              displayStatus
-              trackingInfo { company number url }
-            }
-    """
-    if include_pii:
-        # We deliberately DON'T request the linked `customer` object: that needs the
-        # read_customers scope (+ PCD Email). For shipping/AWB the recipient IS the
-        # shipping address, so the name is derived from shippingAddress instead — covered
-        # by read_orders + the PCD "Name/Phone/Address" grant. Requesting `customer` here
-        # makes the whole query error with ACCESS_DENIED and drops every order.
-        base += """
-            shippingAddress {
-              firstName lastName address1 address2 city province zip country phone
-            }
-        """
-    base += """
-          }
-        }
+        edges { node { %s } }
       }
     }
-    """
-    return base
+    """ % _order_node_fields(include_pii)
 
 
 async def fetch_orders(
@@ -184,6 +182,107 @@ async def fetch_orders(
             break
 
     return all_orders
+
+
+async def fetch_single_order(db: AsyncSession, store_id: int, order_id) -> Optional[Dict[str, Any]]:
+    """Fetch ONE order by id, in the same node shape as fetch_orders. Used by the
+    orders/edited webhook, whose payload is only an edit diff — so we re-fetch the
+    authoritative current state and upsert it."""
+    store = await get_store_from_db(db, store_id)
+    client = get_shopify_client(store)
+    include_pii = (getattr(store, "pii_source", "") or "").lower() == "shopify"
+    query = "query($id: ID!) { order(id: $id) { %s } }" % _order_node_fields(include_pii)
+    gid = f"gid://shopify/Order/{str(order_id).split('/')[-1]}"
+    try:
+        r = await client.post("graphql.json", json={"query": query, "variables": {"id": gid}})
+        r.raise_for_status()
+        payload = r.json()
+        if payload.get("errors"):
+            _logger.error("GraphQL error fetching order %s for %s: %s",
+                          order_id, store.domain, payload["errors"])
+            return None
+        return (payload.get("data") or {}).get("order")
+    except Exception:
+        _logger.exception("Failed to fetch single order %s for %s", order_id, store.domain)
+        return None
+
+
+# --------------------
+# Webhook subscriptions (idempotent, self-healing)
+# --------------------
+
+# (topic, path). GDPR privacy webhooks are declared in shopify.app.toml, not here.
+_OPERATIONAL_WEBHOOKS = [
+    ("APP_UNINSTALLED", "/webhooks/app/uninstalled"),
+    ("ORDERS_CREATE", "/webhooks/orders/create"),
+    ("ORDERS_UPDATED", "/webhooks/orders/updated"),
+    ("ORDERS_EDITED", "/webhooks/orders/edited"),
+]
+
+_LIST_WEBHOOKS_Q = """
+{ webhookSubscriptions(first: 100) {
+    edges { node { topic endpoint { __typename ... on WebhookHttpEndpoint { callbackUrl } } } }
+} }
+"""
+
+_CREATE_WEBHOOK_M = """
+mutation($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) {
+  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) {
+    webhookSubscription { id }
+    userErrors { field message }
+  }
+}
+"""
+
+
+async def ensure_operational_webhooks(store: models.Store) -> Dict[str, Any]:
+    """Make sure every operational webhook is registered for `store`, creating only the
+    missing ones. Idempotent and self-healing: safe to call at install AND on app load,
+    so a registration that failed at install (e.g. before PCD was granted) is repaired on
+    the next open — without a reinstall. Logs userErrors instead of swallowing them."""
+    base = (settings.SHOPIFY_APP_URL or "").rstrip("/")
+    client = get_shopify_client(store)
+
+    # 1) What's already there?
+    existing = set()
+    try:
+        r = await client.post("graphql.json", json={"query": _LIST_WEBHOOKS_Q})
+        r.raise_for_status()
+        for e in ((((r.json().get("data") or {}).get("webhookSubscriptions") or {}).get("edges")) or []):
+            node = e.get("node") or {}
+            cb = (node.get("endpoint") or {}).get("callbackUrl")
+            if node.get("topic") and cb:
+                existing.add((node["topic"], cb))
+    except Exception:
+        _logger.exception("Could not list webhooks for %s; will attempt to (re)create all.", store.domain)
+
+    # 2) Create the missing ones.
+    created, errors = [], []
+    for topic, path in _OPERATIONAL_WEBHOOKS:
+        url = f"{base}{path}"
+        if (topic, url) in existing:
+            continue
+        try:
+            resp = await client.post("graphql.json", json={
+                "query": _CREATE_WEBHOOK_M,
+                "variables": {"topic": topic, "sub": {"callbackUrl": url, "format": "JSON"}},
+            })
+            body = resp.json()
+            ue = ((((body.get("data") or {}).get("webhookSubscriptionCreate")) or {}).get("userErrors")) or []
+            top_errs = body.get("errors") or []
+            if ue or top_errs:
+                errors.append({"topic": topic, "userErrors": ue, "errors": top_errs})
+            else:
+                created.append(topic)
+        except Exception as ex:
+            errors.append({"topic": topic, "exception": str(ex)})
+
+    if created:
+        _logger.info("Webhooks created for %s: %s", store.domain, created)
+    if errors:
+        _logger.warning("Webhook registration issues for %s: %s", store.domain, errors)
+    return {"created": created, "errors": errors,
+            "already_present": [t for (t, _) in existing]}
 
 
 # --------------------

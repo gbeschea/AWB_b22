@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from crud import stores as crud_stores
 from database import get_db
+from services import shopify_service
 from settings import settings
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -136,7 +137,13 @@ async def callback(request: Request, db: AsyncSession = Depends(get_db)):
         is_active=True,
     )
 
-    await _register_webhooks(shop, access_token)
+    # Register operational webhooks (app/uninstalled + orders create/updated/edited).
+    # Idempotent + self-healing: if this fails now (e.g. PCD not yet granted), the on-load
+    # reconcile in /api/me repairs it — no reinstall needed. GDPR webhooks live in the TOML.
+    try:
+        await shopify_service.ensure_operational_webhooks(store)
+    except Exception:
+        _logger.exception("Webhook registration failed at install for %s", shop)
 
     # Backfill recent orders so the app isn't empty on first open. Detached: the merchant
     # is redirected into the embedded app immediately while this runs in the background.
@@ -171,33 +178,3 @@ async def _initial_backfill(store_id: int):
         _logger.exception("Initial backfill failed for store_id=%s", store_id)
 
 
-async def _register_webhooks(shop: str, token: str):
-    """Register operational webhooks (app/uninstalled + orders/create + orders/updated)
-    via Admin GraphQL. GDPR privacy webhooks are declared in shopify.app.toml, not here."""
-    api = settings.SHOPIFY_API_VERSION
-    base = settings.SHOPIFY_APP_URL
-    subs = [
-        ("APP_UNINSTALLED", f"{base}/webhooks/app/uninstalled"),
-        ("ORDERS_CREATE", f"{base}/webhooks/orders/create"),
-        ("ORDERS_UPDATED", f"{base}/webhooks/orders/updated"),
-    ]
-    mutation = """
-    mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) {
-      webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) {
-        userErrors { field message }
-      }
-    }"""
-    async with httpx.AsyncClient(
-        base_url=f"https://{shop}/admin/api/{api}/",
-        headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
-        timeout=20,
-    ) as client:
-        for topic, addr in subs:
-            try:
-                await client.post("graphql.json", json={
-                    "query": mutation,
-                    "variables": {"topic": topic, "sub": {"callbackUrl": addr, "format": "JSON"}},
-                })
-            except httpx.HTTPError:
-                # Non-fatal: the app still installs; webhooks can be re-registered later.
-                pass
