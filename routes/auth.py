@@ -10,11 +10,14 @@
 # Requires (settings.py / .env): SHOPIFY_API_KEY, SHOPIFY_API_SECRET, SHOPIFY_APP_URL,
 # SHOPIFY_SCOPES, SHOPIFY_API_VERSION, SESSION_SECRET.
 
+import asyncio
 import hashlib
 import hmac
+import logging
 import re
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, quote
 
 import httpx
@@ -28,10 +31,15 @@ from database import get_db
 from settings import settings
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+_logger = logging.getLogger(__name__)
 
 _SHOP_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$")
 _STATE_MAX_AGE = 600            # 10 min for the OAuth handshake
 _SESSION_MAX_AGE = 60 * 60 * 24 * 14  # 14 days
+_INSTALL_BACKFILL_DAYS = 30     # how far back to pull orders on first install
+
+# Keep strong refs to detached backfill tasks so they aren't GC'd mid-run.
+_bg_tasks: set = set()
 
 
 def _require_config():
@@ -130,21 +138,47 @@ async def callback(request: Request, db: AsyncSession = Depends(get_db)):
 
     await _register_webhooks(shop, access_token)
 
+    # Backfill recent orders so the app isn't empty on first open. Detached: the merchant
+    # is redirected into the embedded app immediately while this runs in the background.
+    task = asyncio.create_task(_initial_backfill(store.id))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
     session_token = _signer().dumps({"shop": shop, "store_id": store.id, "t": int(time.time())})
-    resp = RedirectResponse(f"{settings.SHOPIFY_APP_URL}/?shop={quote(shop)}", status_code=302)
+    # Re-enter the Shopify admin so the app loads EMBEDDED (not standalone).
+    handle = shop.replace(".myshopify.com", "")
+    admin_url = f"https://admin.shopify.com/store/{handle}/apps/{settings.SHOPIFY_API_KEY}"
+    resp = RedirectResponse(admin_url, status_code=302)
     resp.set_cookie("awb_session", session_token, max_age=_SESSION_MAX_AGE,
                     httponly=True, secure=True, samesite="lax")
     resp.delete_cookie("oauth_state")
     return resp
 
 
+async def _initial_backfill(store_id: int):
+    """Pull the last _INSTALL_BACKFILL_DAYS of orders for a freshly-installed shop.
+    Uses its own DB session (sync_orders_for_stores opens AsyncSessionLocal). Lazy import
+    keeps auth.py free of the sync stack at module load."""
+    try:
+        from services import sync_service
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=_INSTALL_BACKFILL_DAYS)
+        _logger.info("Initial backfill starting for store_id=%s (%s days).",
+                     store_id, _INSTALL_BACKFILL_DAYS)
+        n = await sync_service.sync_orders_for_stores([store_id], start, end)
+        _logger.info("Initial backfill done for store_id=%s: %s orders.", store_id, n)
+    except Exception:
+        _logger.exception("Initial backfill failed for store_id=%s", store_id)
+
+
 async def _register_webhooks(shop: str, token: str):
-    """Register operational webhooks (app/uninstalled + orders/updated) via Admin GraphQL.
-    GDPR privacy webhooks are declared in shopify.app.toml, not here."""
+    """Register operational webhooks (app/uninstalled + orders/create + orders/updated)
+    via Admin GraphQL. GDPR privacy webhooks are declared in shopify.app.toml, not here."""
     api = settings.SHOPIFY_API_VERSION
     base = settings.SHOPIFY_APP_URL
     subs = [
         ("APP_UNINSTALLED", f"{base}/webhooks/app/uninstalled"),
+        ("ORDERS_CREATE", f"{base}/webhooks/orders/create"),
         ("ORDERS_UPDATED", f"{base}/webhooks/orders/updated"),
     ]
     mutation = """

@@ -11,9 +11,11 @@ import {
   Text,
   TextField,
 } from "@shopify/polaris";
-import { ApiError, listOrders, type OrderRow, type OrdersResponse } from "../lib/api";
+import { ApiError, listOrders, syncNow, type OrderRow, type OrdersResponse } from "../lib/api";
 
 const PER_PAGE = 50;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type AddressTone = "success" | "warning" | "critical" | "attention" | undefined;
 
@@ -44,6 +46,7 @@ export default function Orders() {
   const [page, setPage] = useState(1);
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
+  const [syncing, setSyncing] = useState(false);
 
   // Debounce the search box so typing doesn't fire a request per keystroke.
   useEffect(() => {
@@ -70,12 +73,38 @@ export default function Orders() {
     load();
   }, [load]);
 
+  const handleSync = useCallback(async () => {
+    setSyncing(true);
+    try {
+      const res = await syncNow();
+      (window as any).shopify?.toast?.show(
+        res.status === "in_progress" ? "A sync is already running…" : "Syncing orders from Shopify…",
+      );
+      // Give the background backfill a moment, then reload the table.
+      for (let i = 0; i < 8; i++) {
+        await sleep(3000);
+        await load();
+      }
+    } catch (e) {
+      (window as any).shopify?.toast?.show(
+        e instanceof Error ? e.message : "Sync failed to start",
+        { isError: true },
+      );
+    } finally {
+      setSyncing(false);
+    }
+  }, [load]);
+
   const orders = data?.orders ?? [];
   const total = data?.total ?? 0;
   const hasNext = page * PER_PAGE < total;
 
   return (
-    <Page title="Orders" subtitle={total ? `${total} orders` : "Your orders and their AWBs."}>
+    <Page
+      title="Orders"
+      subtitle={total ? `${total} orders` : "Your orders and their AWBs."}
+      primaryAction={{ content: "Sync from Shopify", onAction: handleSync, loading: syncing }}
+    >
       <Card padding="0">
         <div style={{ padding: "12px" }}>
           <TextField
@@ -106,11 +135,16 @@ export default function Orders() {
           <EmptyState
             heading={debouncedQ ? "No matching orders" : "No orders yet"}
             image="https://cdn.shopify.com/s/files/1/0757/9955/files/empty-state.svg"
+            action={
+              debouncedQ
+                ? undefined
+                : { content: "Sync from Shopify", onAction: handleSync, loading: syncing }
+            }
           >
             <p>
               {debouncedQ
                 ? "Try a different search."
-                : "Orders sync in from Shopify and appear here."}
+                : "Pull your recent Shopify orders — new orders then flow in automatically."}
             </p>
           </EmptyState>
         ) : (

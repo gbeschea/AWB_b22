@@ -129,10 +129,22 @@ export interface OverviewResponse {
   print_queue: number;
   has_courier_account: boolean;
   plan: string;
+  last_sync_at: string | null;
+  syncing: boolean;
 }
 
 export function getOverview() {
   return authFetch<OverviewResponse>("/api/overview");
+}
+
+/** `POST /api/sync` — trigger a background backfill of recent orders for this shop. */
+export interface SyncResponse {
+  status: "started" | "in_progress";
+  since_days?: number;
+}
+
+export function syncNow() {
+  return authFetch<SyncResponse>("/api/sync", { method: "POST" });
 }
 
 /** `GET /api/address-issues` — orders whose shipping address needs attention. */

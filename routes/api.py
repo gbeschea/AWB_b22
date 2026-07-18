@@ -2,7 +2,9 @@
 Shopify session token via `require_shop` (returns the active Store). This is the contract
 the frontend calls with App Bridge `authenticatedFetch`.
 """
+import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -19,6 +21,11 @@ from settings import settings
 
 router = APIRouter(prefix="/api", tags=["API"])
 _logger = logging.getLogger(__name__)
+
+# Store ids with an in-flight manual sync (prevents piling up on repeated clicks).
+_SYNC_BACKFILL_DAYS = 30
+_syncing: set = set()
+_sync_tasks: set = set()
 
 
 # --- Fleet-convention endpoints (mirror @studio/core api.health / api.vitals) ---
@@ -51,6 +58,35 @@ async def me(store: models.Store = Depends(require_shop)):
         "api_version": store.api_version,
         "plan": store.plan or "free",
     }
+
+
+# ---- Order sync (manual "Sync now" from the embedded UI) ----
+
+async def _run_backfill(store_id: int):
+    """Pull recent orders for one shop, then clear the in-flight flag. Own DB session
+    (sync_orders_for_stores opens AsyncSessionLocal)."""
+    try:
+        from services import sync_service
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=_SYNC_BACKFILL_DAYS)
+        await sync_service.sync_orders_for_stores([store_id], start, end)
+    except Exception:
+        _logger.exception("Manual sync failed for store_id=%s", store_id)
+    finally:
+        _syncing.discard(store_id)
+
+
+@router.post("/sync")
+async def sync_now(store: models.Store = Depends(require_shop)):
+    """Trigger a backfill of recent orders for THIS shop, in the background.
+    Idempotent-ish: if a sync is already running for the shop, we don't start a second."""
+    if store.id in _syncing:
+        return {"status": "in_progress"}
+    _syncing.add(store.id)
+    task = asyncio.create_task(_run_backfill(store.id))
+    _sync_tasks.add(task)
+    task.add_done_callback(_sync_tasks.discard)
+    return {"status": "started", "since_days": _SYNC_BACKFILL_DAYS}
 
 
 # ---- Billing (Shopify Billing GraphQL; reconcile-on-load) ----
@@ -162,6 +198,8 @@ async def overview(
         "print_queue": print_queue,
         "has_courier_account": len(accounts) > 0,
         "plan": store.plan or "free",
+        "last_sync_at": store.last_sync_at.isoformat() if store.last_sync_at else None,
+        "syncing": store.id in _syncing,
     }
 
 
