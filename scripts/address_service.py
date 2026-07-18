@@ -1,7 +1,7 @@
 
 # -*- coding: utf-8 -*-
 """
-Address validator — v8.3 (AWB Hub)
+Address validator — v8.3 (Order Hub)
 
 Noutăți vs v8.2
 - Suport pentru adrese de forma: "Nr. 5 Strada Lalelelor" / "5 Strada Lalelelor" / "5 Lalelelor 10".

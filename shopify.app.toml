@@ -1,17 +1,16 @@
-# Shopify app configuration for AWB Hub (standalone SaaS, login-via-Shopify).
+# Shopify app configuration for Order Hub (standalone SaaS, login-via-Shopify).
 # Fill client_id after registering the app in the Partner Dashboard.
 # Deploy declared config/scopes/webhooks with:
 #   shopify app deploy --client-id=<id>
 #
-# NOTE: this is a STANDALONE app (embedded = false) — like xConnector, the merchant
-# installs via Shopify OAuth then works in AWB Hub's own UI, not inside the Shopify
-# admin iframe. All URLs must be HTTPS and match the live host.
+# NOTE: EMBEDDED app — renders inside the Shopify admin iframe via App Bridge + Polaris.
+# application_url points at the embedded SPA entry (/app). All URLs must be HTTPS.
 
 client_id = "REPLACE_WITH_PARTNER_DASHBOARD_CLIENT_ID"
-name = "AWB Hub"
-handle = "awb-hub"
-application_url = "https://REPLACE_WITH_APP_HOST"
-embedded = false
+name = "Order Hub"
+handle = "order-hub"
+application_url = "https://REPLACE_WITH_APP_HOST/app"
+embedded = true
 
 [access_scopes]
 # read/write_orders: read order + customer PII for AWB, capture COD, mark-as-paid, tag.

@@ -27,6 +27,36 @@ async def get_courier_account_by_key(db: AsyncSession, account_key: str) -> Opti
     return res.scalar_one_or_none()
 
 
+# ---- Multi-tenant scoped reads (embedded app). During transition a NULL store_id means
+# "legacy/shared", so we return rows owned by the shop OR not-yet-assigned. ----
+
+async def get_courier_accounts_for_store(db: AsyncSession, store_id: int) -> List[models.CourierAccount]:
+    res = await db.execute(
+        select(models.CourierAccount)
+        .where((models.CourierAccount.store_id == store_id) | (models.CourierAccount.store_id.is_(None)))
+        .options(selectinload(models.CourierAccount.mappings))
+        .order_by(models.CourierAccount.name)
+    )
+    return res.scalars().all()
+
+
+async def get_courier_mappings_for_store(db: AsyncSession, store_id: int) -> List[models.CourierMapping]:
+    res = await db.execute(
+        select(models.CourierMapping)
+        .where((models.CourierMapping.store_id == store_id) | (models.CourierMapping.store_id.is_(None)))
+    )
+    return res.scalars().all()
+
+
+async def get_shipment_profiles_for_store(db: AsyncSession, store_id: int) -> List[models.ShipmentProfile]:
+    res = await db.execute(
+        select(models.ShipmentProfile)
+        .where((models.ShipmentProfile.store_id == store_id) | (models.ShipmentProfile.store_id.is_(None)))
+        .order_by(models.ShipmentProfile.id)
+    )
+    return res.scalars().all()
+
+
 async def create_courier_account(
     db: AsyncSession,
     name: str,

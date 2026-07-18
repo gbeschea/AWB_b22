@@ -1,4 +1,4 @@
-# AWB Hub — Master Plan: Shopify-ready · Refactored · Efficient · Lightweight
+# Order Hub — Master Plan: Shopify-ready · Refactored · Efficient · Lightweight
 
 Goal: turn this crufty **single-tenant internal** FastAPI app into a **lean, efficient,
 multi-tenant, Shopify-installable SaaS**. Live in production (awb.arona.ro) → every change is
@@ -61,6 +61,21 @@ North star (from the owner): **(1) Shopify-ready · (2) refactored · (3) techno
 - `Account`/workspace model above `Store`; session-auth guard so the app isn't wide-open (today: **no auth at all**).
 - Scope every query by account; make `ShipmentProfile` per-account (currently globally unique → breaks on tenant #2).
 - Data migration for the existing single tenant → one Account.
+
+### Phase 3.5 — Shopify-NATIVE embedded UI (owner decision: full embedded React/Polaris)
+Architecture (the **light** way to do full-embedded): **one runtime.** FastAPI stays the only
+backend; the UI becomes an embedded **Vite + React + Polaris + App Bridge SPA** that FastAPI serves
+under `/app` and authenticates with **Shopify session-token JWTs** (no Node server in the request path).
+- ✅ Backend vertical slice done: `services/shopify_auth.py` (HS256 session-token verify → shop),
+  `routes/api.py` (`GET /api/me`, session-token-guarded via `require_shop`), `routes/spa.py`
+  (serves `frontend/dist`, injects `%SHOPIFY_API_KEY%`, sets `frame-ancestors` CSP for the admin iframe).
+  Wired in `main.py`; 5 session-token tests added (21 total, green).
+- API contract for the SPA: every `/api/*` call sends `Authorization: Bearer <App Bridge idToken>`.
+- 🔜 `frontend/` SPA scaffold (Vite, Polaris, App Bridge NavMenu, `authFetch` helper, Home screen on
+  `/api/me`) — building now. Then **port each Jinja screen → Polaris React** + add its JSON `/api/*`
+  endpoint (orders dashboard, stores, couriers/profiles, address validation, printing). Retire the Jinja
+  templates + the overlapping `settings.py`/`couriers.py`/`profiles.py` HTML routes once each screen lands.
+- `embedded=false` → **`true`** in `shopify.app.toml` once the SPA is the entry (`application_url=.../app`).
 
 ### Phase 4 — App Store readiness
 - External billing (Stripe or Shopify managed), Partner Dashboard: PCD **Level 1** (persists customer PII),

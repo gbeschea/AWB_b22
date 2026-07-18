@@ -1,5 +1,5 @@
 {% extends "_layout.html" %}
-{% block title %}Comenzi - AWB Hub{% endblock %}
+{% block title %}Comenzi - Order Hub{% endblock %}
 
 {% block content %}
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem;">
@@ -94,7 +94,7 @@
 
                  <div class="grid">
                     <div>
-                        <label for="derived_status">Status AWB Hub</label>
+                        <label for="derived_status">Status Order Hub</label>
                         <select id="derived_status" name="derived_status">
                             <option value="all">Toate ({{ filter_counts.get('derived_status', {}).get('all', 0) }})</option>
                             {% for status in derived_status_options %}
@@ -203,7 +203,7 @@
                     <th data-column-key="selector" style="width: 40px;"><input type="checkbox" id="selectAllCheckbox"></th>
                     <th data-column-key="comanda" data-sort="order_name">Comanda</th>
                     <th data-column-key="data" data-sort="created_at">Data</th>
-                    <th data-column-key="status">Status AWB Hub</th>
+                    <th data-column-key="status">Status Order Hub</th>
                     <th data-column-key="payment_status">Payment Status</th>
                     <th data-column-key="fulfillment_status">Fulfillment Status</th>
                     <th data-column-key="produse" data-sort="line_items_group">Produse</th>

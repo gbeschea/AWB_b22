@@ -14,3 +14,4 @@ async-lru
 PyPDF2
 cryptography
 itsdangerous
+pyjwt

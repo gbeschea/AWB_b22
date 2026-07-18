@@ -13,6 +13,8 @@ from routes import (
     background, profiles, financials,
     couriers as couriers_routes,
     auth as auth_routes,
+    api as api_routes,
+    spa as spa_routes,
 )
 from websocket_manager import manager
 from settings import settings
@@ -26,7 +28,7 @@ except Exception:
     couriers_http_client = None
 
 app = FastAPI(
-    title="AWB Hub",
+    title="Order Hub",
     description="Aplicatie pentru managementul comenzilor și generarea de AWB-uri.",
     version="1.0.0"
 )
@@ -67,6 +69,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Routers
 app.include_router(auth_routes.router)
+app.include_router(api_routes.router)
 app.include_router(orders.router, tags=["Orders"])
 app.include_router(processing.router, tags=["Processing"])
 app.include_router(sync.router, tags=["Sync"])
@@ -82,8 +85,12 @@ app.include_router(store_categories.router, tags=["Store Categories"])
 app.include_router(background.router, tags=["Background Tasks"])
 app.include_router(financials.router, tags=["Financials"])
 app.include_router(actions.router)
-app.include_router(profiles.html_router) 
+app.include_router(profiles.html_router)
 app.include_router(profiles.api_router)
+
+# Embedded React/Polaris SPA (served under /app). Mounted last so its /app/{path:path}
+# catch-all doesn't shadow the API/legacy routes above.
+spa_routes.mount_spa(app)
 
 
 @app.on_event("startup")

@@ -49,6 +49,10 @@ class Store(Base):
   pii_source = Column(String(32), default='shopify', nullable=False)
   is_active = Column(Boolean, default=True, nullable=False)
   last_sync_at = Column(TIMESTAMP(timezone=True), nullable=True)
+  # Billing (cached from Shopify activeSubscriptions; Shopify is source of truth).
+  plan = Column(String(32), default='free', nullable=False)
+  subscription_gid = Column(String(255), nullable=True)
+  subscription_status = Column(String(32), nullable=True)
   orders = relationship('Order', back_populates='store')
   categories = relationship("StoreCategory", secondary=store_category_map, back_populates="stores")
   paper_size = Column(String(16), default='A6', nullable=False)
@@ -166,6 +170,8 @@ class PrintLogEntry(Base):
 class CourierAccount(Base):
     __tablename__ = 'courier_accounts'
     id = Column(Integer, primary_key=True)
+    # Multi-tenancy: which shop owns this account. NULL = legacy/shared (pre-migration).
+    store_id = Column(Integer, ForeignKey('stores.id'), nullable=True, index=True)
     name = Column(String(255), nullable=False)
     account_key = Column(String(64), unique=True, nullable=False, index=True)
     courier_type = Column(String(64), nullable=False, index=True)
@@ -178,6 +184,7 @@ class CourierAccount(Base):
 class CourierMapping(Base):
     __tablename__ = 'courier_mappings'
     id = Column(Integer, primary_key=True)
+    store_id = Column(Integer, ForeignKey('stores.id'), nullable=True, index=True)
     shopify_name = Column(String(255), unique=True, nullable=False, index=True)
     account_key = Column(String(64), ForeignKey('courier_accounts.account_key'), nullable=False)
     account = relationship("CourierAccount", back_populates="mappings")
@@ -198,6 +205,7 @@ class AddressValidation(Base):
 class ShipmentProfile(Base):
     __tablename__ = 'shipment_profiles'
     id = Column(Integer, primary_key=True)
+    store_id = Column(Integer, ForeignKey('stores.id'), nullable=True, index=True)
     name = Column(String(255), unique=True, nullable=False)
     account_key = Column(String(64), ForeignKey('courier_accounts.account_key'), nullable=False)
     default_parcels = Column(Integer, default=1)
@@ -215,3 +223,14 @@ class ShipmentProfile(Base):
     default_packing = sa.Column(sa.String(20), nullable=True)  # DPD: BOX | PALLET | ENVELOPE | BAG | WRAP
 
     account = relationship("CourierAccount")
+
+
+class AppLedger(Base):
+    """Reinstall-proof per-shop flags (e.g. free trial already used). Keyed by a salted
+    hash of the shop domain and deliberately has NO FK to Store, so it survives an
+    uninstall + shop/redact and the trial cannot be reset by reinstalling."""
+    __tablename__ = 'app_ledger'
+    id = Column(Integer, primary_key=True)
+    domain_hash = Column(String(64), unique=True, nullable=False, index=True)
+    trial_used = Column(Boolean, default=False, nullable=False)
+    first_seen = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)

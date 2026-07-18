@@ -1,4 +1,4 @@
-# routes/auth.py — Shopify OAuth install/callback for AWB Hub (standalone, login-via-Shopify).
+# routes/auth.py — Shopify OAuth install/callback for Order Hub (standalone, login-via-Shopify).
 #
 # Flow:
 #   GET /auth/install?shop=<x>.myshopify.com  -> redirect to Shopify consent (signed+cookie state)

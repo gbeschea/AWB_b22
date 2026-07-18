@@ -1,4 +1,4 @@
-# jinja_filters.py — Register extra Jinja filters for AWB Hub
+# jinja_filters.py — Register extra Jinja filters for Order Hub
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo

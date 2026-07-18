@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <!--
+      LOAD-BEARING: the App Bridge CDN script MUST be the FIRST element in <head>,
+      before any other script. App Bridge bootstraps the embedded session / iframe
+      handshake (and exposes the global `shopify`) before the app module runs.
+      The literal %SHOPIFY_API_KEY% is replaced by the FastAPI backend at serve time.
+    -->
+    <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="%SHOPIFY_API_KEY%"></script>
+    <meta name="shopify-api-key" content="%SHOPIFY_API_KEY%" />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Order Hub</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
