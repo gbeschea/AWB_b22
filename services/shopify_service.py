@@ -101,8 +101,12 @@ def _orders_query(include_pii: bool) -> str:
             }
     """
     if include_pii:
+        # We deliberately DON'T request the linked `customer` object: that needs the
+        # read_customers scope (+ PCD Email). For shipping/AWB the recipient IS the
+        # shipping address, so the name is derived from shippingAddress instead — covered
+        # by read_orders + the PCD "Name/Phone/Address" grant. Requesting `customer` here
+        # makes the whole query error with ACCESS_DENIED and drops every order.
         base += """
-            customer { firstName lastName }
             shippingAddress {
               firstName lastName address1 address2 city province zip country phone
             }

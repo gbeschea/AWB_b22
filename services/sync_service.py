@@ -109,11 +109,13 @@ async def _process_and_insert_orders_in_batches(
         for o in batch:
             shopify_id = o["id"].split("/")[-1]
             shipping_address = o.get("shippingAddress") or {}
-            customer = o.get("customer")
+            # Recipient name: prefer the linked customer (only present if read_customers is
+            # granted), else derive from the shipping address (our default — see _orders_query).
+            customer = o.get("customer") or {}
             customer_name = (
-                f"{(customer or {}).get('firstName') or ''} {(customer or {}).get('lastName') or ''}".strip()
-                if customer
-                else None
+                f"{customer.get('firstName') or ''} {customer.get('lastName') or ''}".strip()
+                or f"{shipping_address.get('firstName') or ''} {shipping_address.get('lastName') or ''}".strip()
+                or None
             )
             gateways = o.get("paymentGatewayNames") or []
             financial_status = o.get("displayFinancialStatus") or ""
