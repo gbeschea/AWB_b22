@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Badge,
@@ -17,7 +17,7 @@ import {
 } from "@shopify/polaris";
 import { CheckCircleIcon, ClockIcon } from "@shopify/polaris-icons";
 
-import { authFetch, ApiError, getOverview, syncNow } from "../lib/api";
+import { authFetch, ApiError, getOverview } from "../lib/api";
 import type { MeResponse, OverviewResponse } from "../lib/api";
 
 function InfoRow({ label, children }: { label: string; children: React.ReactNode }) {
@@ -51,51 +51,11 @@ function Stat({ label, value, tone, onClick }: {
   );
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-function formatLastSync(iso: string | null | undefined): string {
-  if (!iso) return "Never";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "Never";
-  const secs = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
-  if (secs < 60) return "just now";
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return `${mins} min ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return d.toLocaleDateString();
-}
-
 export default function Home() {
   const navigate = useNavigate();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [syncing, setSyncing] = useState(false);
-  const pollingRef = useRef(false);
-
-  // Poll /overview every few seconds while a backfill is in flight, until it settles.
-  const pollUntilIdle = useCallback(async () => {
-    if (pollingRef.current) return;
-    pollingRef.current = true;
-    setSyncing(true);
-    try {
-      for (let i = 0; i < 40; i++) {
-        await sleep(3000);
-        let ov: OverviewResponse | null = null;
-        try {
-          ov = await getOverview();
-        } catch {
-          continue;
-        }
-        setOverview(ov);
-        if (!ov.syncing) break;
-      }
-    } finally {
-      pollingRef.current = false;
-      setSyncing(false);
-    }
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,8 +68,6 @@ export default function Home() {
         if (cancelled) return;
         setMe(meRes);
         setOverview(ovRes);
-        // A backfill kicked off at install time may still be running — pick it up.
-        if (ovRes?.syncing) void pollUntilIdle();
       } catch (err) {
         if (cancelled) return;
         setError(
@@ -124,28 +82,11 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [pollUntilIdle]);
-
-  const handleSync = useCallback(async () => {
-    setSyncing(true);
-    try {
-      const res = await syncNow();
-      (window as any).shopify?.toast?.show(
-        res.status === "in_progress" ? "A sync is already running…" : "Syncing orders from Shopify…",
-      );
-      await pollUntilIdle();
-    } catch (err) {
-      (window as any).shopify?.toast?.show(
-        err instanceof Error ? err.message : "Sync failed to start",
-        { isError: true },
-      );
-      setSyncing(false);
-    }
-  }, [pollUntilIdle]);
+  }, []);
 
   if (!me && !error) {
     return (
-      <SkeletonPage title="Order Hub" primaryAction>
+      <SkeletonPage title="Order Hub">
         <BlockStack gap="400">
           <Card>
             <BlockStack gap="300">
@@ -170,21 +111,13 @@ export default function Home() {
     },
     {
       done: (overview?.orders_total ?? 0) > 0,
-      label: "Sync your orders",
-      desc: "Use “Sync orders” above to pull recent orders — new ones then flow in automatically.",
+      label: "Orders sync automatically",
+      desc: "New and edited orders flow in from Shopify within seconds and appear under Orders.",
     },
   ];
 
   return (
-    <Page
-      title="Order Hub"
-      subtitle="Courier & AWB logistics for your Shopify store."
-      primaryAction={{
-        content: "Sync orders",
-        onAction: handleSync,
-        loading: syncing,
-      }}
-    >
+    <Page title="Order Hub" subtitle="Courier & AWB logistics for your Shopify store.">
       <BlockStack gap="400">
         {error && (
           <Banner title="Couldn't load your shop details" tone="critical">
@@ -230,12 +163,8 @@ export default function Home() {
                 <InfoRow label="Plan">
                   <Badge tone="info">{me.plan}</Badge>
                 </InfoRow>
-                <InfoRow label="Orders synced">
-                  {syncing ? (
-                    <Badge tone="attention" progress="partiallyComplete">Syncing…</Badge>
-                  ) : (
-                    <Text as="span" variant="bodyMd">{formatLastSync(overview?.last_sync_at)}</Text>
-                  )}
+                <InfoRow label="Order sync">
+                  <Badge tone="success">Live</Badge>
                 </InfoRow>
               </BlockStack>
             </BlockStack>
