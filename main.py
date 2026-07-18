@@ -19,6 +19,7 @@ from routes import (
     couriers as couriers_routes,
     auth as auth_routes,
     api as api_routes,
+    courier_actions as courier_actions_routes,
     spa as spa_routes,
 )
 from websocket_manager import manager
@@ -75,6 +76,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Routers
 app.include_router(auth_routes.router)
 app.include_router(api_routes.router)
+app.include_router(courier_actions_routes.router)
 app.include_router(orders.router, tags=["Orders"])
 app.include_router(processing.router, tags=["Processing"])
 app.include_router(sync.router, tags=["Sync"])

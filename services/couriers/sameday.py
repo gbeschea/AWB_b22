@@ -215,13 +215,17 @@ class SamedayCourier(BaseCourier):
             "awbRecipient[name]": name[:100],
             "awbRecipient[phoneNumber]": phone,
             "awbRecipient[personType]": str(person_type),
-            "awbRecipient[companyName]": company,
             "awbRecipient[cityString]": city,
             "awbRecipient[county]": str(county_id),
             "awbRecipient[address]": address,
-            "awbRecipient[postalCode]": postal,
-            "awbRecipient[email]": email,
         }
+        # Optional fields: omit when empty — Sameday rejects an empty email/company string.
+        if company:
+            form["awbRecipient[companyName]"] = company
+        if email:
+            form["awbRecipient[email]"] = email
+        if postal:
+            form["awbRecipient[postalCode]"] = postal
         if contact_person:
             form["contactPerson"] = str(contact_person)
 
@@ -233,12 +237,15 @@ class SamedayCourier(BaseCourier):
             form[f"parcels[{i}][length]"] = "10"
 
         url = f"{base_url}{self.CREATE_PATH}"
-        res = await self.client.post(
-            url, data=form,
-            headers={"X-AUTH-TOKEN": token, "Accept": "application/json"}, timeout=45.0,
-        )
+        hdrs = {"X-AUTH-TOKEN": token, "Accept": "application/json"}
+        res = await self.client.post(url, data=form, headers=hdrs, timeout=45.0)
+        # clientInternalReference must be unique per account; on collision (re-create after a
+        # void) retry once without it — the order<->AWB link lives in our own DB.
+        if res.status_code >= 400 and "client_internal_reference" in res.text and "unic" in res.text.lower():
+            form.pop("clientInternalReference", None)
+            res = await self.client.post(url, data=form, headers=hdrs, timeout=45.0)
         if res.status_code >= 400:
-            raise RuntimeError(f"Sameday create AWB HTTP {res.status_code}: {res.text[:500]}")
+            raise RuntimeError(f"Sameday create AWB HTTP {res.status_code}: {res.text[:1000]}")
         data = res.json() if res.content else {}
         awb = data.get("awbNumber") or data.get("awb_number")
         if not awb:
