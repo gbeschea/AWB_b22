@@ -5,10 +5,13 @@ from .dpd import DPDCourier
 from .sameday import SamedayCourier
 from .packeta import PacketaCourier  # NEW
 from .econt import EcontCourier
+from .fancourier import FanCourier
 
 
 
 _http_client = httpx.AsyncClient(timeout=45.0)
+
+_fancourier = FanCourier(_http_client)
 
 _courier_instances = {
     "dpd": DPDCourier(_http_client),
@@ -16,7 +19,9 @@ _courier_instances = {
     "packeta": PacketaCourier(_http_client),     # NEW
     "zasilkovna": PacketaCourier(_http_client),  # alias
     "packetery": PacketaCourier(_http_client),   # alias
-    "econt": EcontCourier(_http_client),  
+    "econt": EcontCourier(_http_client),
+    "fancourier": _fancourier,
+    "fan": _fancourier,  # alias
 }
 
 _courier_instances.update({
