@@ -36,6 +36,19 @@ class Settings(BaseSettings):
     SYNC_INTERVAL_COURIERS_MINUTES: int = 5
     CORS_ORIGINS: List[str] = ["*"]
 
+    # ── Shopify OAuth (app install). Values come from env/.env; secrets live in the
+    #    secret store, never in git. Set these before enabling the /auth install flow.
+    SHOPIFY_API_KEY: Optional[str] = None       # Partner Dashboard client_id
+    SHOPIFY_API_SECRET: Optional[str] = None    # Partner Dashboard client secret (= webhook HMAC secret)
+    SHOPIFY_APP_URL: Optional[str] = None        # https://<app host>, must match shopify.app.toml application_url
+    SHOPIFY_SCOPES: str = (
+        "read_orders,write_orders,read_fulfillments,write_fulfillments,"
+        "read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,"
+        "write_merchant_managed_fulfillment_orders,read_products"
+    )
+    SHOPIFY_API_VERSION: str = "2026-04"
+    SESSION_SECRET: Optional[str] = None         # signs OAuth state nonce + session cookie
+
     print_batch_size: int = 250
     archive_retention_days: int = 7
     

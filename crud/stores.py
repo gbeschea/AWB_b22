@@ -38,6 +38,51 @@ async def get_store_by_id(db: AsyncSession, store_id: int):
     return result.scalar_one_or_none()
 
 
+async def get_store_by_domain(db: AsyncSession, domain: str):
+    result = await db.execute(
+        select(models.Store).where(models.Store.domain == _normalize_domain(domain))
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_or_update_store(
+    db: AsyncSession,
+    *,
+    domain: str,
+    name: str,
+    access_token: str,
+    shared_secret: str,
+    is_active: bool = True,
+):
+    """
+    Upsert a store by domain — used by the Shopify OAuth callback.
+    access_token / shared_secret are written in plaintext here and encrypted at rest
+    by the EncryptedString column type (see encrypted_types.py). Idempotent on reinstall.
+    """
+    domain = _normalize_domain(domain)
+    store = await get_store_by_domain(db, domain)
+    if store is None:
+        store = models.Store(
+            name=(name or domain).strip(),
+            domain=domain,
+            shared_secret=shared_secret,
+            access_token=access_token,
+            is_active=is_active,
+            paper_size="A4",
+            pii_source="shopify",
+        )
+        db.add(store)
+    else:
+        store.access_token = access_token
+        store.shared_secret = shared_secret
+        store.is_active = is_active
+        if name:
+            store.name = name.strip()
+    await db.commit()
+    await db.refresh(store)
+    return store
+
+
 async def create_store(
     db: AsyncSession,
     name: str,

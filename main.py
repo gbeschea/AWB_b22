@@ -1,5 +1,7 @@
 # main.py
 
+import os
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,23 +10,14 @@ from sqlalchemy import text
 from routes import (
     store_categories, printing, logs, orders, sync, labels, actions,
     settings as settings_router, validation, webhooks, processing,
-    background, profiles,
+    background, profiles, financials,
     couriers as couriers_routes,
-    financials # <-- MODIFICARE: Am adăugat noul router
+    auth as auth_routes,
 )
 from websocket_manager import manager
 from settings import settings
 from database import engine
 import logging
-
-from routes.financials import router as financials_router
-
-from routes.couriers_profiles_full import settings_router as couriers_router
-from routes.financials import router as financials_router
-from routes.couriers import settings_router as couriers_settings_router, data_router as couriers_data_router
-
-
-
 
 # Optional: close shared HTTP client used by courier services
 try:
@@ -38,30 +31,42 @@ app = FastAPI(
     version="1.0.0"
 )
 
-app.include_router(couriers_router)
-app.include_router(financials_router, tags=["Financials"])
-
-app.include_router(couriers_settings_router)
-app.include_router(couriers_data_router)
-
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS — explicit allowlist. `allow_origins=["*"]` + credentials is invalid per the
+# CORS spec and insecure, so it was removed. Production MUST set AWB_B2_CORS_ORIGINS
+# (comma-separated exact origins). With it unset we fall back to a dev-only regex that
+# matches any localhost/127.0.0.1 port.
+_cors_env = (os.environ.get("AWB_B2_CORS_ORIGINS") or "").strip()
+if _cors_env:
+    _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    logging.getLogger(__name__).warning(
+        "AWB_B2_CORS_ORIGINS not set — using dev-only localhost CORS. "
+        "Set an explicit allowlist in production."
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Static
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Routers
+app.include_router(auth_routes.router)
 app.include_router(orders.router, tags=["Orders"])
 app.include_router(processing.router, tags=["Processing"])
 app.include_router(sync.router, tags=["Sync"])
@@ -75,7 +80,7 @@ app.include_router(printing.router, tags=["Printing"])
 app.include_router(logs.router, tags=["Logs"])
 app.include_router(store_categories.router, tags=["Store Categories"])
 app.include_router(background.router, tags=["Background Tasks"])
-app.include_router(financials.router, tags=["Financials"]) # <-- MODIFICARE: Am inclus router-ul aici
+app.include_router(financials.router, tags=["Financials"])
 app.include_router(actions.router)
 app.include_router(profiles.html_router) 
 app.include_router(profiles.api_router)

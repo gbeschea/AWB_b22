@@ -6,7 +6,8 @@ from sqlalchemy.dialects.postgresql import TIMESTAMP, JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import JSON
 from sqlalchemy.sql import func
-from database import Base 
+from database import Base
+from encrypted_types import EncryptedString, EncryptedJSON
 import sqlalchemy as sa
 
 
@@ -41,8 +42,9 @@ class Store(Base):
   id = Column(Integer, primary_key=True)
   name = Column(String(255))
   domain = Column(String(255), unique=True)
-  shared_secret = Column(String(255), nullable=True)
-  access_token = Column(String(255), nullable=True)
+  # Encrypted at rest (AES-256-GCM). Legacy plaintext is read transparently. See encrypted_types.py.
+  shared_secret = Column(EncryptedString, nullable=True)
+  access_token = Column(EncryptedString, nullable=True)
   api_version = Column(String(32), default='2025-07', nullable=False)
   pii_source = Column(String(32), default='shopify', nullable=False)
   is_active = Column(Boolean, default=True, nullable=False)
@@ -168,7 +170,8 @@ class CourierAccount(Base):
     account_key = Column(String(64), unique=True, nullable=False, index=True)
     courier_type = Column(String(64), nullable=False, index=True)
     tracking_url = Column(String(512), nullable=True)
-    credentials = Column(JSONB, nullable=True)
+    # Encrypted at rest (AES-256-GCM). Legacy plaintext JSONB is read transparently. See encrypted_types.py.
+    credentials = Column(EncryptedJSON, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     mappings = relationship("CourierMapping", back_populates="account")
 

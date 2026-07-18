@@ -6,8 +6,17 @@ from settings import settings
 
 DATABASE_URL = settings.DATABASE_URL
 
-# Folosim motorul asincron
-engine = create_async_engine(DATABASE_URL)
+# Async engine with a tuned pool. pool_pre_ping avoids "server closed the connection"
+# errors on idle connections to the remote Postgres; pool_recycle drops connections
+# older than 30 min. Sizes are modest to keep the footprint light.
+engine = create_async_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=1800,
+    echo=False,
+)
 
 # Creăm o sesiune asincronă
 AsyncSessionLocal = sessionmaker(

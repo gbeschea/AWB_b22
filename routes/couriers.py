@@ -106,6 +106,39 @@ async def get_couriers_settings_page(request: Request, db: AsyncSession = Depend
     )
 
 
+@settings_router.post("/profiles/create", name="create_shipment_profile")
+async def create_shipment_profile(
+    db: AsyncSession = Depends(get_db),
+    name: str = Form(...),
+    account_key: str = Form(...),
+    default_parcels: int = Form(1),
+    default_weight_kg: float = Form(1.0),
+    default_length_cm: Optional[int] = Form(None),
+    default_width_cm: Optional[int] = Form(None),
+    default_height_cm: Optional[int] = Form(None),
+    default_service_id: Optional[int] = Form(None),
+    content_template: Optional[str] = Form('${orderName} / ${quantity} x ${sku}'),
+):
+    exists = await db.execute(select(models.ShipmentProfile).filter_by(name=name))
+    if exists.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"Un profil cu numele '{name}' există deja.")
+
+    profile = models.ShipmentProfile(
+        name=name,
+        account_key=account_key,
+        default_parcels=default_parcels,
+        default_weight_kg=default_weight_kg,
+        default_length_cm=default_length_cm,
+        default_width_cm=default_width_cm,
+        default_height_cm=default_height_cm,
+        default_service_id=default_service_id,
+        content_template=content_template,
+    )
+    db.add(profile)
+    await db.commit()
+    return RedirectResponse(url="/settings/couriers#profiles", status_code=303)
+
+
 @settings_router.post("/accounts/create", name="create_courier_account")
 async def handle_create_courier_account_form(
     request: Request,
