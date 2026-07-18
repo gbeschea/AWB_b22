@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 
 import models
-from .base import BaseCourier, TrackingResponse
+from .base import BaseCourier, TrackingResponse, VoidResponse
 
 _DPD_MAP = [
     (r"\b(delivered|livrat|delivered back to sender)\b",           "DELIVERED"),
@@ -643,3 +643,33 @@ class DPDCourier(BaseCourier):
             raise RuntimeError(f"Eroare API DPD: {e.response.status_code} - {e.response.text}")
         except Exception as e:
             raise RuntimeError(f"Eroare la descărcarea etichetei DPD: {e}")
+
+    async def void_awb(self, db: AsyncSession, awb: str, account_key: Optional[str] = None) -> VoidResponse:
+        """Cancel a DPD shipment (POST /shipment/cancel). DPD only allows cancel while the
+        shipment is not yet ordered for pickup; empty JSON = success."""
+        try:
+            creds = await self.get_credentials(db, account_key)
+        except ValueError:
+            return VoidResponse(success=False, message="DPD: lipsesc credențialele pentru anulare.")
+        url = f"{DPD_BASE_URL}/shipment/cancel"
+        body = {
+            "userName": creds.get("username") or creds.get("userName"),
+            "password": creds.get("password"),
+            "language": "EN",
+            "shipmentId": str(awb),
+            "comment": "Cancelled via Order Hub",
+        }
+        try:
+            resp = await self.client.post(url, json=body, headers={"Accept": "application/json"},
+                                          timeout=30.0, follow_redirects=False)
+            try:
+                data = resp.json() if resp.content else {}
+            except Exception:
+                data = {"text": resp.text[:300]}
+            err = data.get("error") if isinstance(data, dict) else None
+            if resp.status_code < 400 and not err:
+                return VoidResponse(success=True, raw=data)
+            msg = (err or {}).get("message") if isinstance(err, dict) else (err or f"HTTP {resp.status_code}")
+            return VoidResponse(success=False, message=str(msg) or resp.text[:200], raw=data)
+        except Exception as e:
+            return VoidResponse(success=False, message=f"Eroare rețea DPD la anulare: {e}")

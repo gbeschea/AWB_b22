@@ -34,6 +34,13 @@ class LabelResponse:
     extra: Optional[Dict[str, Any]] = None
 
 
+@dataclass
+class VoidResponse:
+    success: bool
+    message: Optional[str] = None
+    raw: Optional[Any] = None
+
+
 class BaseCourier(ABC):
     """
     Bază comună pentru curieri.
@@ -60,6 +67,11 @@ class BaseCourier(ABC):
     @abstractmethod
     async def get_label(self, *args, **kwargs) -> Any:
         ...
+
+    async def void_awb(self, *args, **kwargs) -> "VoidResponse":
+        """Cancel/void an AWB. Not every courier supports it (or only before pickup is
+        ordered). Default: unsupported — adapters override where the API allows it."""
+        raise NotImplementedError(f"{self.__class__.__name__}.void_awb not implemented")
 
     async def get_credentials(self, db: AsyncSession, account_key: Optional[str]) -> Dict[str, Any]:
         """
@@ -135,4 +147,4 @@ class BaseCourier(ABC):
         raise ValueError(f"Nu s-au găsit credențiale pentru contul '{account_key}'")
 
 
-__all__ = ["BaseCourier", "TrackingResponse", "LabelResponse"]
+__all__ = ["BaseCourier", "TrackingResponse", "LabelResponse", "VoidResponse"]
