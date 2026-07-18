@@ -248,10 +248,12 @@ def _order_json(o: models.Order) -> dict:
         "city": o.shipping_city,
         "phone": o.shipping_phone,
         "assigned_courier": o.assigned_courier,
+        "shipment_id": s.id if s else None,
         "awb": s.awb if s else None,
         "courier": s.courier if s else None,
         "last_status": s.last_status if s else None,
         "printed": bool(s and s.printed_at) if s else False,
+        "financial_paid": (o.financial_status or "").lower() == "paid",
     }
 
 

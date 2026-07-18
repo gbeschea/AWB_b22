@@ -67,10 +67,12 @@ export interface OrderRow {
   city: string | null;
   phone: string | null;
   assigned_courier: string | null;
+  shipment_id: number | null;
   awb: string | null;
   courier: string | null;
   last_status: string | null;
   printed: boolean;
+  financial_paid: boolean;
 }
 
 export interface OrdersResponse {
@@ -120,6 +122,65 @@ export interface CouriersResponse {
 
 export function getCouriers() {
   return authFetch<CouriersResponse>("/api/couriers");
+}
+
+// ---- Courier actions (create / bulk / void / label) ----
+
+export interface CreatedAwb {
+  order_id: number;
+  order_name: string | null;
+  awb: string;
+  courier: string;
+}
+export interface BulkAwbResponse {
+  success: boolean;
+  created: CreatedAwb[];
+  errors: { order_id: number | string; error: string }[];
+  total: number;
+  pickup?: { supported?: boolean; requested?: boolean; message?: string } | null;
+}
+export interface AwbCreateOptions {
+  label_size?: string;      // A4 | A6
+  address_id?: string;      // pickup point / locker id
+  service_id?: number;
+  parcels_count?: number;
+  total_weight?: number;
+}
+
+export function createBulkAwb(order_ids: number[], account_key: string, options?: AwbCreateOptions) {
+  return authFetch<BulkAwbResponse>("/api/awb/bulk", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ order_ids, account_key, options: options ?? {} }),
+  });
+}
+
+export function voidAwb(shipment_id: number) {
+  return authFetch<{ success: boolean; voided_awb: string }>("/api/awb/void", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ shipment_id }),
+  });
+}
+
+/** Fetch the label PDF (auth) and open it in a new tab for printing. */
+export async function printLabel(shipment_id: number, size = "A6"): Promise<void> {
+  const token = await shopify.idToken();
+  const res = await fetch(`/api/awb/label?shipment_id=${shipment_id}&size=${encodeURIComponent(size)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    let msg = `Label request failed (${res.status})`;
+    try {
+      const b = (await res.json()) as { detail?: string };
+      msg = b.detail ?? msg;
+    } catch { /* keep */ }
+    throw new ApiError(res.status, msg);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  window.open(url, "_blank");
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 /** `GET /api/overview` — Home dashboard signals. */
