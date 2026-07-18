@@ -4,29 +4,138 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from services.couriers.base import BaseCourier, TrackingResponse, LabelResponse
+from services.couriers.base import BaseCourier, TrackingResponse, LabelResponse, VoidResponse
 from crud.couriers import get_courier_account_by_key
 from httpx import Response
 
 logger = logging.getLogger("services.couriers.econt")
 
+_COUNTRY_CODE3 = {"RO": "ROU", "BG": "BGR", "GR": "GRC"}
+
 
 class EcontCourier(BaseCourier):
     """
-    Tracking Econt via /services endpoints (ex: https://ee.econt.com/services/track?shipmentNumber=AWB)
-    - Nu cade sync-ul dacă răspunsul nu e standard; întoarce status=None (N/A).
-    - Nu cere autentificare pentru tracking public. Dacă ai alt base_url, pune-l pe cont.
+    Econt (RO/BG) — create/label/void via the JSON services API + tracking.
+    Create: POST {base}/services/Shipments/LabelService.createLabel.json (basic auth).
+    Credentials: {api:{username,password}, sender_address:{...}, base_url?}.
     """
 
     name: str = "econt"
     display_name: str = "Econt"
+    DEFAULT_BASE = "https://ee.econt.com"
 
-    # -------- AWB creation/label (neimplementat la Econt aici) ----------
-    async def create_awb(self, db, order, account_key: Optional[str] = None) -> LabelResponse:
-        return LabelResponse(success=False, message="Create AWB pentru Econt nu este implementat.")
+    @staticmethod
+    def _api(creds: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+        api = creds.get("api") or {}
+        return api.get("username") or api.get("user"), api.get("password") or api.get("pass")
 
-    async def get_label(self, db, awb: str, account_key: Optional[str] = None) -> LabelResponse:
-        return LabelResponse(success=False, message="Descarcare label pentru Econt nu este implementată.")
+    async def create_awb(self, db, order, account_key: Optional[str] = None,
+                         *, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        opts = options or {}
+        creds = await self.get_credentials(db, account_key)
+        user, pwd = self._api(creds)
+        if not user or not pwd:
+            raise RuntimeError("Econt: lipsesc api username/password.")
+        sender = creds.get("sender_address") or {}
+        base = (creds.get("base_url") or self.DEFAULT_BASE).rstrip("/")
+        url = f"{base}/services/Shipments/LabelService.createLabel.json"
+
+        def g(*names: str) -> str:
+            for n in names:
+                v = getattr(order, n, None)
+                if v:
+                    return str(v).strip()
+            return ""
+
+        rname = g("shipping_name", "customer")
+        rphone = g("shipping_phone")
+        rcity = g("shipping_city")
+        rstreet = g("shipping_address1")
+        addr2 = g("shipping_address2")
+        if addr2:
+            rstreet = f"{rstreet}, {addr2}".strip(", ")
+        rzip = g("shipping_zip")
+        rcountry = (g("shipping_country") or "RO").upper()[:2]
+        code3 = _COUNTRY_CODE3.get(rcountry, "ROU")
+        if not (rname and rphone and rcity and rstreet):
+            raise RuntimeError("Econt: lipsesc date destinatar (nume/telefon/oraș/adresă).")
+
+        parcels = max(int(opts.get("parcels_count") or 1), 1)
+        weight = float(opts.get("total_weight") or 1.0)
+        cod = float(opts.get("cod_amount") or 0.0)
+        currency = opts.get("currency") or ("RON" if code3 == "ROU" else "BGN")
+
+        label: Dict[str, Any] = {
+            "senderClient": {
+                "name": sender.get("contact_person") or sender.get("name") or "Sender",
+                "phones": [sender.get("phone") or ""],
+                "email": sender.get("email") or "",
+            },
+            "senderAddress": {
+                "city": {
+                    "name": sender.get("city"),
+                    "postCode": sender.get("postal_code") or sender.get("zip"),
+                    "country": {"code3": "ROU"},
+                },
+                "street": sender.get("street"),
+                "num": sender.get("street_no") or sender.get("num") or "1",
+            },
+            "receiverClient": {"name": rname, "phones": [rphone]},
+            "receiverAddress": {
+                "city": {"name": rcity, "postCode": rzip, "country": {"code3": code3}},
+                "street": rstreet,
+                "num": opts.get("street_no") or "1",
+            },
+            "packCount": parcels,
+            "shipmentType": "PACK",
+            "weight": round(weight, 3),
+            "shipmentDescription": (getattr(order, "name", None) or "Colet")[:255],
+            "orderNumber": getattr(order, "name", None) or "",
+        }
+        if cod > 0:
+            label["services"] = {"cdAmount": round(cod, 2), "cdType": "get", "cdCurrency": currency}
+
+        body = {"label": label, "mode": "create"}
+        r = await self.http.post(url, json=body, auth=(user, pwd), timeout=45.0)
+        data = r.json() if r.content else {}
+        if r.status_code >= 400 or (isinstance(data, dict) and data.get("type") and "error" in str(data.get("type")).lower()):
+            raise RuntimeError(f"Econt create HTTP {r.status_code}: {r.text[:700]}")
+        lbl = (data.get("label") or {}) if isinstance(data, dict) else {}
+        awb = lbl.get("shipmentNumber")
+        if not awb:
+            raise RuntimeError(f"Econt: răspuns fără shipmentNumber: {str(data)[:400]}")
+        return {"awb": str(awb), "raw": lbl, "label_available": bool(lbl.get("pdfURL")),
+                "pdf_url": lbl.get("pdfURL")}
+
+    async def get_label(self, awb: str, creds: dict, paper_size: str = "A6") -> bytes:
+        """Fetch the Econt label PDF. Econt returns the URL at creation (stored in the
+        shipment); if a pdf_url is passed via creds, fetch that. Otherwise not retrievable
+        by AWB alone."""
+        pdf_url = (creds or {}).get("pdf_url")
+        if not pdf_url:
+            raise NotImplementedError("Econt: eticheta se obține din pdfURL-ul de la creare.")
+        user, pwd = self._api(creds)
+        r = await self.http.get(pdf_url, auth=(user, pwd) if user else None, timeout=30.0)
+        if r.status_code != 200 or r.content[:4] != b"%PDF":
+            raise RuntimeError(f"Econt label HTTP {r.status_code}")
+        return r.content
+
+    async def void_awb(self, db, awb: str, account_key: Optional[str] = None) -> VoidResponse:
+        try:
+            creds = await self.get_credentials(db, account_key)
+        except ValueError:
+            return VoidResponse(success=False, message="Econt: lipsesc credențialele pentru anulare.")
+        user, pwd = self._api(creds)
+        base = (creds.get("base_url") or self.DEFAULT_BASE).rstrip("/")
+        url = f"{base}/services/Shipments/LabelService.deleteLabels.json"
+        try:
+            r = await self.http.post(url, json={"shipmentNumbers": [str(awb)]}, auth=(user, pwd), timeout=30.0)
+            data = r.json() if r.content else {}
+            if r.status_code < 400:
+                return VoidResponse(success=True, raw=data)
+            return VoidResponse(success=False, message=f"HTTP {r.status_code}: {r.text[:200]}", raw=data)
+        except Exception as e:
+            return VoidResponse(success=False, message=f"Eroare rețea Econt la anulare: {e}")
 
     # ------------------------------- Tracking ----------------------------
     async def track_awb(self, db, awb: str, account_key: Optional[str] = None) -> TrackingResponse:
