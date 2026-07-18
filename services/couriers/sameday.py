@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import unicodedata
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
 
@@ -40,6 +41,8 @@ class SamedayCourier(BaseCourier):
         super().__init__(client)
         # cache token per (base_url, username)
         self._token_cache: Dict[str, Dict[str, Any]] = {}
+        # cache county-name -> Sameday county id (per base_url)
+        self._county_cache: Dict[str, int] = {}
 
     # ----------------------- helpers -----------------------
     @staticmethod
@@ -109,6 +112,39 @@ class SamedayCourier(BaseCourier):
             log.exception("Sameday auth exception: %s", e)
             return None
 
+    @staticmethod
+    def _strip_diacritics(s: str) -> str:
+        return "".join(c for c in unicodedata.normalize("NFKD", s or "") if not unicodedata.combining(c))
+
+    async def _resolve_county_id(self, base_url: str, token: str, county_name: str) -> Optional[int]:
+        """Sameday needs awbRecipient[county] as its geolocation ID, not the name.
+        Resolve name -> id via /api/geolocation/county (diacritic-insensitive), cached."""
+        if not county_name:
+            return None
+        key = self._strip_diacritics(county_name).strip().lower()
+        if key in self._county_cache:
+            return self._county_cache[key]
+        try:
+            res = await self.client.get(
+                f"{base_url}/api/geolocation/county",
+                headers={"X-AUTH-TOKEN": token},
+                params={"name": self._strip_diacritics(county_name).strip(), "countPerPage": 20},
+                timeout=20.0,
+            )
+            data = (res.json() or {}).get("data") or []
+        except Exception:
+            data = []
+        cid = None
+        for row in data:
+            if self._strip_diacritics(row.get("name") or "").strip().lower() == key:
+                cid = row.get("id")
+                break
+        if cid is None and data:  # fall back to the first match Sameday returned
+            cid = data[0].get("id")
+        if cid is not None:
+            self._county_cache[key] = cid
+        return cid
+
     # ----------------------- interfață publică -----------------------
     async def create_awb(
         self, db: AsyncSession, order: Order, account_key: str,
@@ -161,6 +197,10 @@ class SamedayCourier(BaseCourier):
             raise RuntimeError("Sameday: lipsesc date destinatar (nume/telefon/oraș/adresă).")
         person_type = 1 if company else 0  # 0=persoană fizică, 1=juridică
 
+        county_id = await self._resolve_county_id(base_url, token, county)
+        if not county_id:
+            raise RuntimeError(f"Sameday: județ necunoscut '{county}'.")
+
         form: Dict[str, str] = {
             "pickupPoint": str(pickup_point),
             "packageType": str(package_type),
@@ -177,7 +217,7 @@ class SamedayCourier(BaseCourier):
             "awbRecipient[personType]": str(person_type),
             "awbRecipient[companyName]": company,
             "awbRecipient[cityString]": city,
-            "awbRecipient[county]": county,
+            "awbRecipient[county]": str(county_id),
             "awbRecipient[address]": address,
             "awbRecipient[postalCode]": postal,
             "awbRecipient[email]": email,
