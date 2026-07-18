@@ -6,10 +6,10 @@
 # NOTE: EMBEDDED app — renders inside the Shopify admin iframe via App Bridge + Polaris.
 # application_url points at the embedded SPA entry (/app). All URLs must be HTTPS.
 
-client_id = "REPLACE_WITH_PARTNER_DASHBOARD_CLIENT_ID"
+client_id = "ff9dd8fce3200b486b34297fa0c1faf8"
 name = "Order Hub"
 handle = "order-hub"
-application_url = "https://REPLACE_WITH_APP_HOST/app"
+application_url = "https://order-hub.syncerp.work/app"
 embedded = true
 
 [access_scopes]
@@ -19,7 +19,7 @@ scopes = "read_orders,write_orders,read_fulfillments,write_fulfillments,read_ass
 
 [auth]
 redirect_urls = [
-  "https://REPLACE_WITH_APP_HOST/auth/callback"
+  "https://order-hub.syncerp.work/auth/callback"
 ]
 
 [webhooks]
@@ -37,9 +37,9 @@ api_version = "2026-04"
 
   # MANDATORY GDPR / privacy-compliance webhooks (added by the hardening pass).
   [webhooks.privacy_compliance]
-  customer_data_request_url = "https://REPLACE_WITH_APP_HOST/webhooks/customers/data_request"
-  customer_deletion_url     = "https://REPLACE_WITH_APP_HOST/webhooks/customers/redact"
-  shop_deletion_url         = "https://REPLACE_WITH_APP_HOST/webhooks/shop/redact"
+  customer_data_request_url = "https://order-hub.syncerp.work/webhooks/customers/data_request"
+  customer_deletion_url     = "https://order-hub.syncerp.work/webhooks/customers/redact"
+  shop_deletion_url         = "https://order-hub.syncerp.work/webhooks/shop/redact"
 
 [build]
 automatically_update_urls_on_dev = false

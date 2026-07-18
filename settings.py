@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     class Config:
         env_file = '.env'
         env_file_encoding = 'utf-8'
+        # .env also holds operational vars read via os.environ (AWB_B2_ENC_KEY,
+        # AWB_B2_CORS_ORIGINS, SHOPIFY_BILLING_TEST) — don't reject them here.
+        extra = "ignore"
 
 settings = Settings()
 
