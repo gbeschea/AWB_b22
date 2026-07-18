@@ -10,7 +10,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Order
-from .base import BaseCourier, TrackingResponse
+from .base import BaseCourier, TrackingResponse, VoidResponse
 
 log = logging.getLogger("couriers.sameday")
 log.setLevel(logging.INFO)
@@ -31,6 +31,8 @@ class SamedayCourier(BaseCourier):
     AUTH_PATH = "/api/authenticate"
     TRACK_PATH_TMPL = "/api/client/awb/{awb}/status"
     LABEL_PATH_TMPL = "/api/awb/download/{awb}/{size}"
+    CREATE_PATH = "/api/awb"
+    CANCEL_PATH_TMPL = "/api/awb/{awb}"
 
     _rate_limit_interval: float = 0.20  # mic delay între call-uri, ca să evităm rate limits
 
@@ -108,11 +110,119 @@ class SamedayCourier(BaseCourier):
             return None
 
     # ----------------------- interfață publică -----------------------
-    async def create_awb(self, db: AsyncSession, order: Order, account_key: str) -> Dict[str, Any]:
-        """
-        Neimplementat aici – păstrăm comportamentul tău.
-        """
-        raise NotImplementedError("Crearea AWB Sameday nu e implementată în această versiune.")
+    async def create_awb(
+        self, db: AsyncSession, order: Order, account_key: str,
+        *, options: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a Sameday eAWB (POST /api/awb, form-encoded, X-AUTH-TOKEN).
+
+        Sender/pickup + service defaults come from the account credentials (pickup_point_id,
+        default_service_id, default_package_type, awb_payment). Recipient city/county go as
+        strings — Sameday resolves them."""
+        opts = options or {}
+        creds = await self.get_credentials(db, account_key)
+        base_url = self._choose_base(creds)
+        token = await self._get_token(base_url, creds)
+        if not token:
+            raise RuntimeError("Sameday: autentificare eșuată.")
+
+        service = int(opts.get("service_id") or creds.get("default_service_id") or 0)
+        if not service:
+            raise RuntimeError("Sameday: lipsește service_id (default_service_id).")
+        pickup_point = opts.get("pickup_point_id") or creds.get("pickup_point_id")
+        if not pickup_point:
+            raise RuntimeError("Sameday: lipsește pickup_point_id.")
+        contact_person = opts.get("contact_person") or creds.get("contact_person_id")
+        package_type = int(opts.get("package_type", creds.get("default_package_type", 0)) or 0)
+        awb_payment = int(opts.get("awb_payment", creds.get("awb_payment", 1)) or 1)
+        parcels_count = max(int(opts.get("parcels_count") or 1), 1)
+        total_weight = float(opts.get("total_weight") or 1.0)
+        cod = float(opts.get("cod_amount") or 0.0)
+
+        def g(*names) -> str:
+            for n in names:
+                v = getattr(order, n, None)
+                if v:
+                    return str(v).strip()
+            return ""
+
+        name = g("shipping_name", "customer")
+        phone = g("shipping_phone")
+        city = g("shipping_city")
+        county = g("shipping_province")
+        address = g("shipping_address1")
+        addr2 = g("shipping_address2")
+        if addr2:
+            address = f"{address}, {addr2}".strip(", ")
+        postal = g("shipping_zip")
+        email = g("shipping_email")
+        company = g("shipping_company")
+        if not (name and phone and city and address):
+            raise RuntimeError("Sameday: lipsesc date destinatar (nume/telefon/oraș/adresă).")
+        person_type = 1 if company else 0  # 0=persoană fizică, 1=juridică
+
+        form: Dict[str, str] = {
+            "pickupPoint": str(pickup_point),
+            "packageType": str(package_type),
+            "packageNumber": str(parcels_count),
+            "packageWeight": str(round(total_weight, 2)),
+            "service": str(service),
+            "awbPayment": str(awb_payment),
+            "cashOnDelivery": str(round(cod, 2)),
+            "insuredValue": "0",
+            "thirdPartyPickup": "0",
+            "clientInternalReference": (g("name") or "")[:50],
+            "awbRecipient[name]": name[:100],
+            "awbRecipient[phoneNumber]": phone,
+            "awbRecipient[personType]": str(person_type),
+            "awbRecipient[companyName]": company,
+            "awbRecipient[cityString]": city,
+            "awbRecipient[county]": county,
+            "awbRecipient[address]": address,
+            "awbRecipient[postalCode]": postal,
+            "awbRecipient[email]": email,
+        }
+        if contact_person:
+            form["contactPerson"] = str(contact_person)
+
+        per_w = max(total_weight / parcels_count, 0.1)
+        for i in range(parcels_count):
+            form[f"parcels[{i}][weight]"] = str(round(per_w, 2))
+            form[f"parcels[{i}][width]"] = "10"
+            form[f"parcels[{i}][height]"] = "10"
+            form[f"parcels[{i}][length]"] = "10"
+
+        url = f"{base_url}{self.CREATE_PATH}"
+        res = await self.client.post(
+            url, data=form,
+            headers={"X-AUTH-TOKEN": token, "Accept": "application/json"}, timeout=45.0,
+        )
+        if res.status_code >= 400:
+            raise RuntimeError(f"Sameday create AWB HTTP {res.status_code}: {res.text[:500]}")
+        data = res.json() if res.content else {}
+        awb = data.get("awbNumber") or data.get("awb_number")
+        if not awb:
+            raise RuntimeError(f"Sameday: răspuns fără awbNumber: {data}")
+        return {"awb": str(awb), "raw": data, "label_available": True}
+
+    async def void_awb(self, db: AsyncSession, awb: str, account_key: Optional[str] = None) -> VoidResponse:
+        """Cancel a Sameday AWB (DELETE /api/awb/{awb})."""
+        try:
+            creds = await self.get_credentials(db, account_key)
+        except ValueError:
+            return VoidResponse(success=False, message="Sameday: lipsesc credențialele pentru anulare.")
+        base_url = self._choose_base(creds)
+        token = await self._get_token(base_url, creds)
+        if not token:
+            return VoidResponse(success=False, message="Sameday: autentificare eșuată la anulare.")
+        url = f"{base_url}{self.CANCEL_PATH_TMPL.format(awb=awb)}"
+        try:
+            res = await self.client.delete(url, headers={"X-AUTH-TOKEN": token}, timeout=30.0)
+            if res.status_code in (200, 204):
+                return VoidResponse(success=True, raw=(res.json() if res.content else {}))
+            return VoidResponse(success=False, message=f"HTTP {res.status_code}: {res.text[:200]}")
+        except Exception as e:
+            return VoidResponse(success=False, message=f"Eroare rețea Sameday la anulare: {e}")
 
     async def track_awb(self, db: AsyncSession, awb: str, account_key: Optional[str]) -> TrackingResponse:
         """
