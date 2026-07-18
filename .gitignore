@@ -7,3 +7,11 @@ node_modules/
 logs/
 
 arhiva_printuri/
+# secrets — never commit (2026-07-18 security remediation)
+Prejmer123#
+Prejmer123#.pub
+SSH
+*.pem
+*.key
+id_rsa*
+*_rsa
