@@ -1,6 +1,7 @@
 # services/couriers/gls.py
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 from datetime import datetime, timedelta
@@ -121,7 +122,12 @@ class GLSCourier(BaseCourier):
             parcel["CODAmount"] = round(cod, 2)
             parcel["CODReference"] = (getattr(order, "name", None) or "")[:40]
 
-        body = {**self._auth(creds), "ParcelList": [parcel], "TypeOfPrinter": "A4_2x2", "PrintPosition": 1}
+        # PrintLabels registers the parcel AND returns the ParcelNumber + label PDF in one call.
+        # (PrepareLabels returns only a ParcelId, no number.) The label size is chosen HERE via
+        # TypeOfPrinter — GLS generates the label now, so we keep the returned PDF for printing.
+        sz = str(opts.get("label_size") or "A6").upper()
+        printer = "Thermo" if sz in ("A6", "A7", "THERMO") else "A4_2x2"
+        body = {**self._auth(creds), "ParcelList": [parcel], "TypeOfPrinter": printer, "PrintPosition": 1}
         r = await self.client.post(f"{base}/PrintLabels", json=body, timeout=45.0)
         data = r.json() if r.content else {}
         if r.status_code >= 400:
@@ -135,16 +141,23 @@ class GLSCourier(BaseCourier):
         pid = first.get("ParcelId")
         if not awb:
             raise RuntimeError(f"GLS: răspuns fără ParcelNumber: {str(data)[:300]}")
-        return {"awb": str(awb), "raw": {"ParcelId": pid, "ParcelNumber": awb},
-                "label_available": bool(data.get("Labels")), "parcel_id": pid}
+        labels = data.get("Labels")
+        label_b64 = base64.b64encode(bytes(labels)).decode() if labels else None
+        return {"awb": str(awb), "raw": {"ParcelId": pid, "ParcelNumber": awb, "label_b64": label_b64},
+                "label_available": bool(label_b64), "parcel_id": pid}
 
     async def get_label(self, awb: str, creds: dict, paper_size: str = "A6") -> bytes:
-        """Fetch the label via GetPrintedLabels (needs ParcelId, passed as creds['parcel_id'])."""
+        """Return the GLS label PDF. GLS generates it at create (PrintLabels), so we serve the
+        stored PDF (creds['label_b64']); GetPrintedLabels can't re-fetch an already-printed one."""
+        b64 = (creds or {}).get("label_b64")
+        if b64:
+            return base64.b64decode(b64)
         parcel_id = (creds or {}).get("parcel_id")
         if not parcel_id:
-            raise NotImplementedError("GLS: eticheta necesită ParcelId (din răspunsul de la creare).")
+            raise NotImplementedError("GLS: eticheta e în răspunsul de la creare (label_b64).")
         base = self._base(creds)
-        printer = "A4_2x2" if (paper_size or "A6").upper() != "A4" else "A4"
+        sz = (paper_size or "A6").upper()
+        printer = "Thermo" if sz in ("A6", "A7", "THERMO") else "A4_2x2"
         body = {**self._auth(creds), "ParcelIdList": [int(parcel_id)], "TypeOfPrinter": printer, "PrintPosition": 1}
         r = await self.client.post(f"{base}/GetPrintedLabels", json=body, timeout=30.0)
         data = r.json() if r.content else {}

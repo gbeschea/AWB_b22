@@ -220,17 +220,27 @@ async def void_awb(
 @router.get("/awb/label")
 async def get_label(
     shipment_id: int,
+    size: Optional[str] = None,
     store: models.Store = Depends(require_shop),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return the courier label PDF for a shipment (inline)."""
+    """Return the courier label PDF for a shipment (inline). `size` (A4/A6) overrides the
+    shipment default where the courier renders the label at print time."""
     ship = await _load_shipment(db, store, shipment_id)
     acct = await _get_account(db, store, ship.account_key)
     svc = get_courier_service(ship.courier or ship.account_key or "")
     if not svc:
         raise HTTPException(400, "Curier nesuportat pentru etichetă.")
+    # Merge courier-specific label handles saved at create time (GLS label_b64, Econt pdf_url,
+    # Packeta packet_id, GLS parcel_id) into the creds passed to the adapter.
+    creds = dict(acct.credentials or {})
+    csd = ship.courier_specific_data or {}
+    for k in ("label_b64", "pdf_url", "packet_id", "parcel_id"):
+        if isinstance(csd, dict) and csd.get(k):
+            creds[k] = csd[k]
+    paper = (size or ship.paper_size or "A6")
     try:
-        pdf = await svc.get_label(ship.awb, acct.credentials, ship.paper_size or "A6")
+        pdf = await svc.get_label(ship.awb, creds, paper)
     except NotImplementedError:
         raise HTTPException(400, f"Eticheta nu e suportată pentru {ship.courier}.")
     except Exception as e:
