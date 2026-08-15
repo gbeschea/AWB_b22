@@ -421,6 +421,38 @@ def _set_order_fields(order: Any, status: str, score: int, errors: List[str], su
         suggestions = list(suggestions or []) + [f"validator_version={__VALIDATOR_VERSION__}"]
         setattr(order, "address_suggestions", suggestions)
 
+async def _shadow_validate(order: Any, b_is_valid: bool) -> None:
+    """SHADOW (Faza 3): rulează validatorul NOU consolidat (services.nomenclator.runner = A + guard omonimie)
+    în PARALEL cu B, DOAR log — fail-safe (orice eroare e înghițită), NU atinge rezultatul live. Activ doar cu
+    env ADDR_SHADOW=1. Când shadow-diff confirmă paritatea, se face flip-ul (runner devine autoritar)."""
+    import os as _os
+    if _os.environ.get("ADDR_SHADOW") != "1":
+        return
+    try:
+        from services.nomenclator import runner as _runner
+        import logging as _logging
+        fields = {
+            "province": getattr(order, "shipping_province", None) or "",
+            "city":     getattr(order, "shipping_city", None) or "",
+            "zip":      getattr(order, "shipping_zip", None) or "",
+            "address1": getattr(order, "shipping_address1", None) or "",
+            "address2": getattr(order, "shipping_address2", None) or "",
+        }
+        r = await _runner.validate_address(fields)
+        _logging.getLogger("addr_shadow").info(
+            "SHADOW order=%s B=%s NEW=%s corr=%s note=%s",
+            getattr(order, "name", getattr(order, "id", "?")),
+            "valid" if b_is_valid else "invalid",
+            r.get("status"), r.get("address"), (r.get("note") or "")[:120])
+    except Exception as e:  # shadow-ul NU poate afecta NICIODATĂ validarea live
+        try:
+            import logging as _logging
+            _logging.getLogger("addr_shadow").warning("SHADOW-ERR order=%s: %s",
+                getattr(order, "name", getattr(order, "id", "?")), e)
+        except Exception:
+            pass
+
+
 # ================== Main validate ==================
 
 async def validate_address_for_order(db: AsyncSession, order: Any) -> ValidationResult:
@@ -446,21 +478,21 @@ async def validate_address_for_order(db: AsyncSession, order: Any) -> Validation
     if detect_easybox(in_addr1, in_addr2):
         z6 = re.sub(r"\D", "", in_zip_raw or "").zfill(6)
         if not re.fullmatch(r"\d{6}", z6):
-            msg = "Adresă locker detectată, dar codul poștal lipsește sau are format greșit (6 cifre)."
+            msg = "Locker address detected, but the postal code is missing or malformed (must be 6 digits)."
             _set_order_fields(order, "invalid", 40, [msg], [])
             return ValidationResult(False, 40, [msg], [])
         zip_rows = await _load_by_zip(db, z6)
         if not zip_rows:
-            msg = f"Adresă locker detectată, dar codul poștal {z6} nu există în nomenclatorul din baza de date."
+            msg = f"Locker address detected, but postal code {z6} isn't in the address database."
             _set_order_fields(order, "invalid", 40, [msg], [])
             return ValidationResult(False, 40, [msg], [])
-        _set_order_fields(order, "valid", 100, ["Adresă locker (easybox/pick-up) detectată — valid."], [])
-        return ValidationResult(True, 100, ["Adresă locker (easybox/pick-up) detectată — valid."], [])
+        _set_order_fields(order, "valid", 100, ["Locker (easybox/pick-up) address detected — valid."], [])
+        return ValidationResult(True, 100, ["Locker (easybox/pick-up) address detected — valid."], [])
 
     # 1) București: normalizează sectorul dacă apare textual
     in_judet, in_city, detected_sector = bucharest_fix(in_judet_raw, in_city_raw, in_addr1, in_addr2)
     if detected_sector and (norm_text(in_judet_raw) != "bucuresti" or norm_text(in_city_raw) != "bucuresti"):
-        suggestions.append(f"Recomandat: Județ='București' și Localitate='București' (sector {detected_sector}).")
+        suggestions.append(f"Recommended: set province and city to \u2018Bucure\u0219ti\u2019 (sector {detected_sector}).")
 
     # 2) Extrage stradă & număr (strict pe număr)
     street1 = street_core(in_addr1)
@@ -476,28 +508,31 @@ async def validate_address_for_order(db: AsyncSession, order: Any) -> Validation
     # 3) ZIP obligatoriu (format + existență în DB)
     z6 = re.sub(r"\D", "", in_zip_raw or "").zfill(6)
     if not re.fullmatch(r"\d{6}", z6):
-        errors.append("Cod poștal lipsă sau format greșit (trebuie 6 cifre).")
+        errors.append("Postal code missing or malformed (must be 6 digits).")
 
     zip_rows = await _load_by_zip(db, z6) if not errors else []
     if not errors and not zip_rows:
-        errors.append(f"Codul poștal {z6} nu există în nomenclatorul din baza de date.")
+        errors.append(f"Postal code {z6} isn't in the address database.")
 
     # 4) Numărul este obligatoriu (exceptând easybox)
     if not chosen_number:
-        errors.append("Numărul stradal lipsește din adresă (obligatoriu).")
+        errors.append("The street number is missing from the address (required).")
 
     # 5) Validare J/L vs ZIP (ZIP-first)
     if zip_rows:
         j_owner, l_owner = _zip_owner_stats(zip_rows)
         if j_owner and l_owner:
             if not same_locality(j_owner, in_judet) or not same_locality(l_owner, in_city):
-                errors.append("Județ/localitate nu corespund codului poștal.")
-                suggestions.append(f"Actualizează la: {l_owner}, {j_owner} (conform ZIP).")
+                errors.append("Province/city don't match the postal code.")
+                suggestions.append(f"Update to: {l_owner}, {j_owner} (per the postal code).")
 
     # 6) Sugestie de stradă (fuzzy în perimetrul ZIP) — nu blochează validarea
     if zip_rows and chosen_street:
         if not _rows_for_street(zip_rows, chosen_street):
-            suggestions.append("Verifică denumirea străzii (nu găsesc potrivire pentru localitatea din ZIP).")
+            suggestions.append("Check the street name — no match found for the city in that postal code.")
+
+    # SHADOW: rulează validatorul consolidat în paralel (log-only, fail-safe) — B rămâne autoritar.
+    await _shadow_validate(order, not errors)
 
     # Emitere rezultat
     if errors:
@@ -506,6 +541,199 @@ async def validate_address_for_order(db: AsyncSession, order: Any) -> Validation
 
     _set_order_fields(order, "valid", 100, [], suggestions)
     return ValidationResult(True, 100, [], suggestions)
+
+
+async def _recommend_zip_loose(db: AsyncSession, city: Optional[str], judet: Optional[str],
+                               street: Optional[str], number: Optional[str]) -> Optional[str]:
+    """Robust ZIP recommendation independent of normalized columns: loose ILIKE on locality (+ county
+    to disambiguate same-named towns), then _candidate_zip_from_jl (street + house-number aware, with
+    a most-common fallback). Mirrors the suggest path, which is proven to hit the nomenclator."""
+    from sqlalchemy import and_
+    if not city or not city.strip():
+        return None
+    conds = [models.RomaniaAddress.localitate.ilike(f"%{city.strip()}%")]
+    if judet and judet.strip():
+        conds.append(models.RomaniaAddress.judet.ilike(f"%{judet.strip()}%"))
+    rows = (await db.execute(
+        select(models.RomaniaAddress).where(and_(*conds)).limit(600)
+    )).scalars().all()
+    if not rows:
+        return None
+    return _candidate_zip_from_jl(rows, street, number)
+
+
+async def analyze_address(db: AsyncSession, f: Dict[str, Any]) -> Dict[str, Any]:
+    """Live, NON-persisting analysis of an ad-hoc address for the editor. Returns structured
+    anomalies — what's wrong, per field — each with a plain-language recommendation and (where we
+    can compute it) a one-click `fix` (e.g. the correct ZIP or the correct city/county). Powers the
+    'note anomalies + recommend a solution' UX while the user edits, before saving. Same rules as
+    validate_address_for_order, but structured and non-blocking on the order."""
+    in_judet_raw = (f.get("province") or "").strip()
+    in_city_raw  = (f.get("city") or "").strip()
+    in_zip_raw   = (f.get("zip") or "").strip()
+    in_addr1     = (f.get("address1") or "").strip()
+    in_addr2     = (f.get("address2") or "").strip()
+
+    anomalies: List[Dict[str, Any]] = []
+    suggestions: List[str] = []
+
+    if detect_easybox(in_addr1, in_addr2):
+        z6 = re.sub(r"\D", "", in_zip_raw or "").zfill(6)
+        if not re.fullmatch(r"\d{6}", z6) or not await _load_by_zip(db, z6):
+            anomalies.append({"field": "zip", "blocking": True,
+                              "issue": "Locker address, but the postal code is missing or unknown.",
+                              "recommendation": "Check the locker's postal code."})
+        return {"status": "invalid" if anomalies else "valid", "score": 40 if anomalies else 100,
+                "valid": not anomalies, "anomalies": anomalies,
+                "suggestions": ["Locker (easybox/pick-up) address detected."], "recommended_zip": None}
+
+    in_judet, in_city, detected_sector = bucharest_fix(in_judet_raw, in_city_raw, in_addr1, in_addr2)
+    if detected_sector and (norm_text(in_judet_raw) != "bucuresti" or norm_text(in_city_raw) != "bucuresti"):
+        anomalies.append({"field": "province", "blocking": False,
+                          "issue": f"Sector {detected_sector} detected, but province/city aren't Bucure\u0219ti.",
+                          "recommendation": "Set province and city to Bucure\u0219ti.",
+                          "fix": {"province": "București", "city": "București"}})
+
+    s1, s2 = street_core(in_addr1), street_core(in_addr2)
+    chosen_street = s1 if len(s1) >= len(s2) else s2
+    NO_NUM_RE = re.compile(r"\b(f\.?\s*n\.?|fara\s+nr\.?|fara\s+numar|fără\s+număr)\b", re.I)
+    chosen_number = None if NO_NUM_RE.search(" ".join([in_addr1, in_addr2])) \
+        else (_has_real_house_number(in_addr1) or _has_real_house_number(in_addr2))
+
+    z6 = re.sub(r"\D", "", in_zip_raw or "").zfill(6)
+    zip_ok = bool(re.fullmatch(r"\d{6}", z6))
+    zip_rows = await _load_by_zip(db, z6) if zip_ok else []
+
+    # Compute the correct ZIP from the locality nomenclator (respecting the house number) when the
+    # given ZIP is missing/malformed/unknown — this is the "codul poștal ar trebui să fie X" note.
+    # Use a plain ILIKE query (NOT _load_candidates_for_locality — its unaccent() fallback can abort
+    # the transaction on DBs without the extension), then let _candidate_zip_from_jl pick the best.
+    recommended_zip = None
+    if in_city and (not zip_ok or not zip_rows or z6 == "000000"):
+        recommended_zip = await _recommend_zip_loose(db, in_city, in_judet, chosen_street, chosen_number)
+
+    if not in_zip_raw:
+        a = {"field": "zip", "blocking": True, "issue": "The postal code is missing.",
+             "recommendation": "Add the postal code (6 digits)."}
+        if recommended_zip:
+            a["recommendation"] = f"The postal code should be {recommended_zip}."
+            a["fix"] = {"zip": recommended_zip}
+        anomalies.append(a)
+    elif not zip_ok:
+        a = {"field": "zip", "blocking": True,
+             "issue": f"Malformed postal code (\u201c{in_zip_raw}\u201d) — it must be 6 digits.",
+             "recommendation": "Correct the postal code."}
+        if recommended_zip:
+            a["recommendation"] = f"The correct postal code is {recommended_zip}."
+            a["fix"] = {"zip": recommended_zip}
+        anomalies.append(a)
+    elif not zip_rows:
+        a = {"field": "zip", "blocking": True,
+             "issue": f"Postal code {z6} isn't in the address database.",
+             "recommendation": "Check the postal code."}
+        if recommended_zip and recommended_zip != z6:
+            a["recommendation"] = f"The correct postal code looks like {recommended_zip}."
+            a["fix"] = {"zip": recommended_zip}
+        anomalies.append(a)
+
+    if not chosen_number:
+        anomalies.append({"field": "address1", "blocking": True,
+                          "issue": "The street number is missing from the address (required).",
+                          "recommendation": "Add the street number (e.g. \u201cnr. 9\u201d)."})
+
+    if zip_rows:
+        j_owner, l_owner = _zip_owner_stats(zip_rows)
+        if j_owner and l_owner and (not same_locality(j_owner, in_judet) or not same_locality(l_owner, in_city)):
+            anomalies.append({"field": "city", "blocking": True,
+                              "issue": f"Province/city don't match postal code {z6} (which belongs to {l_owner}, {j_owner}).",
+                              "recommendation": f"Update to {l_owner}, {j_owner} (per the postal code).",
+                              "fix": {"city": l_owner, "province": j_owner}})
+        if chosen_street and not _rows_for_street(zip_rows, chosen_street):
+            suggestions.append("Check the street name — no match found within that postal code area.")
+
+    valid = not any(a.get("blocking") for a in anomalies)
+    return {"status": "valid" if valid else "invalid", "score": 100 if valid else 40, "valid": valid,
+            "anomalies": anomalies, "suggestions": suggestions, "recommended_zip": recommended_zip}
+
+
+async def suggest_address(db: AsyncSession, q: str, field: str = "street",
+                          city: Optional[str] = None, province: Optional[str] = None,
+                          zip_code: Optional[str] = None, limit: int = 8) -> List[Dict[str, Any]]:
+    """As-you-type completion from the RO nomenclator. `field` = street|city|zip. Returns candidate
+    completions with their {street/city/province/zip}. The caller keeps the house number — a street
+    suggestion carries the street NAME only, so the UI re-appends the number the user typed."""
+    from sqlalchemy import cast, String, and_
+    q = (q or "").strip()
+    field = (field or "street").lower()
+    out: List[Dict[str, Any]] = []
+
+    if field == "city":
+        if len(q) < 2:
+            return []
+        rows = (await db.execute(
+            select(models.RomaniaAddress.localitate, models.RomaniaAddress.judet)
+            .where(models.RomaniaAddress.localitate.ilike(f"{q}%")).distinct().limit(limit * 4)
+        )).all()
+        seen = set()
+        for loc, jud in rows:
+            k = (norm_text(loc), norm_text(jud))
+            if not loc or k in seen:
+                continue
+            seen.add(k)
+            out.append({"label": f"{loc}, {jud}", "city": loc, "province": jud})
+            if len(out) >= limit:
+                break
+        return out
+
+    if field == "zip":
+        digits = re.sub(r"\D", "", q)
+        if len(digits) < 3:
+            return []
+        col = _zip_col()
+        rows = (await db.execute(
+            select(models.RomaniaAddress).where(cast(col, String).ilike(f"{digits}%")).limit(limit * 6)
+        )).scalars().all()
+        seen = set()
+        for r in rows:
+            cp = str(getattr(r, "cod_postal", "") or "").strip().zfill(6)
+            if not re.fullmatch(r"\d{6}", cp) or cp in seen:
+                continue
+            seen.add(cp)
+            out.append({"label": f"{cp} — {r.localitate}, {r.judet}", "zip": cp,
+                        "city": r.localitate, "province": r.judet})
+            if len(out) >= limit:
+                break
+        return out
+
+    # street (default) — narrow to the given locality/ZIP so completions are relevant
+    if len(q) < 2:
+        return []
+    conds = [models.RomaniaAddress.nume_strada.ilike(f"%{q}%")]
+    if city:
+        conds.append(models.RomaniaAddress.localitate.ilike(f"%{city.strip()}%"))
+    if zip_code and re.fullmatch(r"\d{6}", re.sub(r"\D", "", zip_code).zfill(6)):
+        conds.append(cast(_zip_col(), String).ilike(re.sub(r"\D", "", zip_code).zfill(6)))
+    rows = (await db.execute(
+        select(models.RomaniaAddress).where(and_(*conds)).limit(limit * 8)
+    )).scalars().all()
+    seen = set()
+    for r in rows:
+        tip = (getattr(r, "tip_artera", "") or "").strip()
+        nume = (getattr(r, "nume_strada", "") or "").strip()
+        full = " ".join(x for x in [tip, nume] if x).strip()
+        k = norm_text(full)
+        if not full or k in seen:
+            continue
+        seen.add(k)
+        cp = str(getattr(r, "cod_postal", "") or "").strip().zfill(6)
+        out.append({"label": full + (f" · {cp}" if re.fullmatch(r'\d{6}', cp) else ""),
+                    "street": full, "city": r.localitate, "province": r.judet,
+                    "zip": cp if re.fullmatch(r"\d{6}", cp) else None})
+        if len(out) >= limit:
+            break
+    return out
+
+
 async def validate_unvalidated_orders(
     db: AsyncSession,
     days: Optional[int] = None,
