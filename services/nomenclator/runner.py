@@ -79,20 +79,22 @@ def _apply_homonym_guard(cur, fields: Dict[str, Any], result: Dict[str, Any], po
     in_city = (fields.get("city") or "").strip()
     if not in_city:
         return result
-    out_city = ((result.get("address") or {}).get("city") or in_city).strip()
+    out = result.get("address") or {}
+    out_city = (out.get("city") or in_city).strip()
+    has_zip = bool(re.sub(r"\D", "", fields.get("zip") or ""))
     renamed = _fold(out_city) != _fold(in_city)            # incl. expandare 'popesti' -> 'popesti-leordeni'
-    if not renamed:
-        return result
+    derived_zip = (not has_zip) and bool((out.get("zip") or "").strip())  # a inventat un ZIP (client n-avea)
+    if not (renamed or derived_zip):
+        return result                                       # nici redenumire, nici ZIP derivat → nimic riscant
     if _homonym_counties(cur, in_city) < 2:
         return result                                       # nume unic național → sigur
-    has_zip = bool(re.sub(r"\D", "", fields.get("zip") or ""))
     county = fields.get("province") or ""
     unique_in_county = bool(county) and _matches_in_county(cur, in_city, county) == 1
     corroborated = has_zip or (policy["homonym_guard"] == "unique_in_county" and unique_in_county)
     if not corroborated:
         return {"status": "cs", "address": None, "source": "homonym-guard",
-                "note": "localitate omonimă '%s' redenumită '%s' fără ZIP client / unic-în-județ → nu ghicesc satul"
-                        % (in_city, out_city)}
+                "note": "localitate omonimă '%s' fără ZIP client / unic-în-județ → nu ghicesc (redenumire/ZIP derivat pe nume ambiguu)"
+                        % in_city}
     return result
 
 
