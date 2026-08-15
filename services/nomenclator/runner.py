@@ -18,6 +18,7 @@ from psycopg2 import pool as _pgpool
 
 from .policy import merge_policy
 from . import address_nomenclator as N
+from . import intl as I
 
 _POOL: Optional[_pgpool.ThreadedConnectionPool] = None
 
@@ -102,17 +103,26 @@ def _validate_sync(fields: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, 
     conn = _pool().getconn()
     try:
         cur = conn.cursor()
-        r = N.validate_and_correct(
-            cur, fields.get("province") or "", fields.get("city") or "", fields.get("zip") or "",
-            fields.get("address1") or "", fields.get("address2") or "",
-        )
-        return _apply_homonym_guard(cur, fields, r, policy)
+        # RUTARE pe țară: RO/necunoscut(gol) → validatorul bogat RO + guard omonimie;
+        # CZ/PL/BG/HU/SK → nomenclatoarele intl; altă țară → needs_geocoder (HERE).
+        cc = I.country_code(fields.get("country") or "RO")
+        if cc == "RO":
+            r = N.validate_and_correct(
+                cur, fields.get("province") or "", fields.get("city") or "", fields.get("zip") or "",
+                fields.get("address1") or "", fields.get("address2") or "",
+            )
+            return _apply_homonym_guard(cur, fields, r, policy)
+        if I.supported(cc):
+            return I.validate(cur, cc, fields, policy)
+        return {"status": "needs_geocoder", "address": None, "source": "intl",
+                "note": "țară fără nomenclator (%s) → geocoder/HERE" % cc}
     finally:
+        conn.rollback()   # tranzacția rămâne murdară după query-uri; pool-ul refolosește conexiunea
         _pool().putconn(conn)
 
 
 async def validate_address(fields: Dict[str, Any], overrides: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """fields = {province, city, zip, address1, address2}. Întoarce {status, address, source, note}."""
+    """fields = {country, province, city, zip, address1, address2}. Întoarce {status, address, source, note}."""
     policy = merge_policy(overrides)
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, functools.partial(_validate_sync, fields, policy))

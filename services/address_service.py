@@ -432,6 +432,7 @@ async def _shadow_validate(order: Any, b_is_valid: bool) -> None:
         from services.nomenclator import runner as _runner
         import logging as _logging
         fields = {
+            "country":  getattr(order, "shipping_country", None) or "",
             "province": getattr(order, "shipping_province", None) or "",
             "city":     getattr(order, "shipping_city", None) or "",
             "zip":      getattr(order, "shipping_zip", None) or "",
