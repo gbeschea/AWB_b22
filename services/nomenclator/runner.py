@@ -99,6 +99,30 @@ def _apply_homonym_guard(cur, fields: Dict[str, Any], result: Dict[str, Any], po
     return result
 
 
+def _here_fallback(cur, cc: str, fields: Dict[str, Any], r: Dict[str, Any], policy: Dict[str, Any],
+                   key: str) -> Dict[str, Any]:
+    """A doua opinie HERE pe verdictul needs_geocoder (poarta de producție, port verbatim în geocoder.py):
+    RO → zip-fill cu street-match + garda oraș; orice țară → confirmare stradă+oraș as-is."""
+    from . import geocoder as G
+    iso3 = G.country_iso3(cc)
+    if not iso3:
+        return r
+    ms = float(policy.get("here_min_score") or 0.9)
+    ad = {"address1": fields.get("address1"), "address2": fields.get("address2"),
+          "city": fields.get("city"), "zip": fields.get("zip")}
+    if cc == "RO":
+        z = G.here_zip_fill(ad, key, cur=cur, min_score=ms)
+        if z:
+            return {"status": "corrected", "source": "here",
+                    "address": {"province": fields.get("province") or "", "city": fields.get("city"),
+                                "zip": z["zip"], "address1": fields.get("address1") or ""},
+                    "note": (r.get("note") or "") + " · HERE zip-fill " + z["zip"]}
+    if G.here_street_ok(ad, key, country=iso3, min_score=ms):
+        return {"status": "valid", "address": None, "source": "here",
+                "note": (r.get("note") or "") + " · HERE confirmă strada+orașul (as-is)"}
+    return r
+
+
 def _validate_sync(fields: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, Any]:
     conn = _pool().getconn()
     try:
@@ -111,11 +135,18 @@ def _validate_sync(fields: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, 
                 cur, fields.get("province") or "", fields.get("city") or "", fields.get("zip") or "",
                 fields.get("address1") or "", fields.get("address2") or "",
             )
-            return _apply_homonym_guard(cur, fields, r, policy)
-        if I.supported(cc):
-            return I.validate(cur, cc, fields, policy)
-        return {"status": "needs_geocoder", "address": None, "source": "intl",
-                "note": "țară fără nomenclator (%s) → geocoder/HERE" % cc}
+            r = _apply_homonym_guard(cur, fields, r, policy)
+        elif I.supported(cc):
+            r = I.validate(cur, cc, fields, policy)
+        else:
+            r = {"status": "needs_geocoder", "address": None, "source": "intl",
+                 "note": "țară fără nomenclator (%s) → geocoder/HERE" % cc}
+        # HERE = a doua opinie, DOAR când runner-ul e autoritar (în shadow ar dubla quota cronului)
+        # și politica o permite. Cheia vine din env (HERE_API_KEY).
+        if (r.get("status") == "needs_geocoder" and policy.get("here_geocoder")
+                and os.environ.get("ADDR_SHADOW") != "1" and os.environ.get("HERE_API_KEY")):
+            r = _here_fallback(cur, cc, fields, r, policy, os.environ["HERE_API_KEY"])
+        return r
     finally:
         conn.rollback()   # tranzacția rămâne murdară după query-uri; pool-ul refolosește conexiunea
         _pool().putconn(conn)
