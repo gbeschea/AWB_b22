@@ -9,6 +9,7 @@ from .fancourier import FanCourier
 from .gls import GLSCourier
 from .testcourier import TestCourier
 from .xconnector import XConnectorCourier
+from .frisbo import FrisboCourier
 
 
 
@@ -28,6 +29,9 @@ _courier_instances = {
     "gls": GLSCourier(_http_client),
     # Puntea xConnector — AWB + facturi prin API-ul xconnector.app (paritate cu cronul).
     "xconnector": XConnectorCourier(_http_client),
+    # Frisbo 3PL — AWB-ul îl generează depozitul Frisbo; OH citește eticheta/tracking-ul,
+    # regenerează cu alt nr de colete și împinge comanda în flux (azi: duppo.md / Moldova).
+    "frisbo": FrisboCourier(_http_client),
     # Test mode's sandbox courier (see testcourier.py) — never contacts anyone.
     "test": TestCourier(_http_client),
 }

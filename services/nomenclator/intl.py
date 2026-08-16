@@ -213,6 +213,47 @@ def _pick_pc(locs, client_pc):
     return ranked[0][3], ranked[0][2]
 
 
+def _lev1(a, b):
+    """Distanța de editare ≤1 (verificare rapidă, fără matrice)."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    if la > lb:
+        a, b, la, lb = b, a, lb, la
+    i = j = diff = 0
+    while i < la and j < lb:
+        if a[i] == b[j]:
+            i += 1; j += 1
+        else:
+            diff += 1
+            if diff > 1:
+                return False
+            j += 1
+    return True
+
+
+def _fuzzy_locality(cur, cfg, cand):
+    """Typo de localitate ('durlesto'→'durlesti'): ≥6 litere, aceeași primă literă, 1 editare,
+    match UNIC în tabelul de localități — altfel None (nu ghicim între mai multe)."""
+    lt = cfg.get("loc")
+    if not lt or len(cand) < 6:
+        return None
+    ln = cfg.get("loc_norm", cfg["city_norm"])
+    cur.execute("select distinct %s from %s where left(%s,1)=%%s and abs(length(%s)-%%s)<=1"
+                % (ln, lt, ln, ln), (cand[0], len(cand)))
+    best = None
+    for (nm,) in cur.fetchall():
+        if nm and nm != cand and _lev1(cand, nm):
+            if best is not None:
+                return None          # ambiguu → nu ghicesc
+            best = nm
+    return best
+
+
 def _street_pcs(cur, cfg, city_norm_val, street):
     cur.execute("select distinct regexp_replace(%s,'\\D','','g') from %s "
                 "where (%s=%%s or replace(%s,'-',' ')=%%s) and %s like %%s"
@@ -399,6 +440,42 @@ def validate(cur, country, fields, policy=None):
         return {"status": "needs_geocoder", "address": None, "source": "intl",
                 "note": "cod poștal %s, localitate '%s' cu multe coduri, strada nu discriminează (%s) → geocoder"
                         % (zip_desc, disp, cc)}
+    # — orașul din câmp nu s-a găsit: localitatea poate fi în ADDRESS1 ('Durleşti, mun. Chişinău' cu
+    #   city='Durleșto') sau orașul e un TYPO la 1 literă ('durlesto'→'durlesti') —
+    resolved, via = None, None
+    for tok in [t for t in _fold(a1_raw).split() if len(t) >= 5][:8]:
+        locs = _locality_pcs(cur, cfg, tok)
+        if locs:
+            resolved, via = locs, "address1"
+            break
+    if not resolved:
+        for cand in cands:
+            fz = _fuzzy_locality(cur, cfg, cand)
+            if fz:
+                locs = _locality_pcs(cur, cfg, fz)
+                if locs:
+                    resolved, via = locs, "typo '%s'" % cand
+                    break
+    if resolved:
+        disp = re.sub(r"\s+\d+$", "", resolved[0][0]) or resolved[0][0]   # 'Cahul 1' → 'Cahul'
+        if len(pc) == cfg["pclen"] and not cfg["pc_complete"]:
+            return corrected(disp, fields.get("zip"),
+                             "oraș corectat din %s: '%s'→'%s'; cod %s păstrat (%s, nomenclator incomplet)"
+                             % (via, city_raw, disp, pc, cc))
+        if street and len(street) >= 3:
+            spcs = sorted(set(_street_pcs(cur, cfg, _fold(disp), street)))
+            if len(spcs) == 1:
+                return corrected(disp, cfg["fmt"](spcs[0]),
+                                 "oraș corectat din %s: '%s'→'%s'; cod %s → derivat din stradă (%s)"
+                                 % (via, city_raw, disp, zip_desc, cc))
+        picked = _pick_pc(resolved, pc)
+        if picked:
+            return corrected(disp, cfg["fmt"](picked[1]),
+                             "oraș corectat din %s: '%s'→'%s'; cod %s → derivat din localitate (%s)"
+                             % (via, city_raw, disp, zip_desc, cc))
+        return {"status": "needs_geocoder", "address": None, "source": "intl",
+                "note": "localitate '%s' (din %s) cu multe coduri, cod %s nederivabil (%s) → geocoder"
+                        % (disp, via, zip_desc, cc)}
     if not pc:
         return {"status": "cs", "address": None, "source": "intl",
                 "note": "fără cod poștal și localitate negăsită în nomenclator: '%s' (%s)" % (city_raw, cc)}
