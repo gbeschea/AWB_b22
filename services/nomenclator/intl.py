@@ -57,7 +57,7 @@ def country_code(s):
 # loc_cnt = coloana de frecvență în tabelul de localități (None = fără; folosită la alegerea codului dominant)
 CFG = {
     "CZ": dict(pclen=5, tbl="cz_addresses", city="obec", city_norm="obec_norm", street_norm="ulice_norm", pc="psc",
-               fmt=lambda d: d[:3] + " " + d[3:], pc_complete=True, loc_cnt="cnt"),
+               fmt=lambda d: d[:3] + " " + d[3:], pc_complete=True, loc_cnt="cnt", part="cast_obce"),
     "PL": dict(pclen=5, tbl="pl_addresses", city="city", city_norm="city_norm", street_norm="street_norm", pc="postcode",
                fmt=lambda d: d[:2] + "-" + d[2:], pc_complete=False, loc_cnt="cnt"),
     "BG": dict(pclen=4, tbl="bg_streets_osm", city="city", city_norm="city_norm", street_norm="street_norm", pc="postcode",
@@ -76,6 +76,13 @@ _STREETWORDS = re.compile(
     r"\b(ul|ulica|ulice|ulici|str|street|namesti|namestie|nam|trida|tr|utca|ut|krt|korut|bul|bulevard|blvd|"
     r"pl|ploshtad|aleja|al|osiedle|os|ул|улица|бул|"
     r"булевард|площад)\.?\b", re.I)
+
+# ridicare de la OFICIU de curier (BG dominant — Econt/Speedy) → adresa stradală e irelevantă, valid direct.
+# Lever-ul #1 BG (memoria intl-address-nomenclators): HERE le-ar respinge (negeocodabile) → CS degeaba.
+_OFFICE_RE = re.compile(r"офис|еконт|спиди|автогара|куриер|econt|speedy|do ofis|офиса на", re.I)
+
+# adresă GOALĂ/gunoi: fără nicio literă în a1+a2, sau markerul „nu am" — nimeni nu poate livra → CS
+_NO_ADDR = {"няма", "nyama", "nu am", "n a", "na", "nemam"}
 
 # prefixe de localitate (gr./с./кв./obec/miasto…), deja prin fold (fără diacritice, lowercase)
 _CITY_PREFIX = {"gr", "s", "selo", "grad", "kv", "zh", "jk", "obec", "mesto", "miasto", "wies", "oras", "obl",
@@ -120,15 +127,17 @@ def supported(country):
 
 
 def _owners_of_pc(cur, cfg, pc):
-    """[(nume_afisabil, norm, lat_norm|None)] pentru localitățile care dețin codul poștal.
+    """[(nume_afisabil, norm, alt_norm|None)] pentru localitățile care dețin codul poștal.
     Normele pentru COMPARAȚIE se calculează cu _fold pe numele afișabil (convențiile *_norm stocate diferă
-    între loadere — ex. sk_localities păstrează cratimele: 'kosice-barca')."""
+    între loadere — ex. sk_localities păstrează cratimele: 'kosice-barca'). `alt` = a doua identitate a
+    localității: BG = transliterarea latină (name_lat), CZ = partea-comună (cast_obce — 'Třebčín' aparține
+    obcei Slatinice; clientul scrie partea, AWB-ul vrea obcea)."""
     lt = cfg.get("loc", cfg["tbl"])
     lc, lp = cfg.get("loc_city", cfg["city"]), cfg.get("loc_pc", cfg["pc"])
-    lat = cfg.get("lat")
-    cols = lc + (", " + lat if lat else "")
+    alt = cfg.get("lat") or cfg.get("part")
+    cols = lc + (", " + alt if alt else "")
     cur.execute("select distinct %s from %s where regexp_replace(%s,'\\D','','g')=%%s" % (cols, lt, lp), (pc,))
-    return [(r[0], _fold(r[0]), _fold(r[1]) if lat and len(r) > 1 and r[1] else None) for r in cur.fetchall()]
+    return [(r[0], _fold(r[0]), _fold(r[1]) if alt and len(r) > 1 and r[1] else None) for r in cur.fetchall()]
 
 
 def _locality_pcs(cur, cfg, cand):
@@ -204,7 +213,20 @@ def validate(cur, country, fields, policy=None):
     street = _street_core(fields.get("address1"))
     prov = fields.get("province") or ""
     a1_raw = fields.get("address1") or ""
+    a2_raw = fields.get("address2") or ""
     cands = city_candidates(city_raw)
+
+    # 0) BG: ridicare de la OFICIU de curier → valid direct (paritate producție; HERE le-ar respinge degeaba)
+    if cc == "BG" and _OFFICE_RE.search(" ".join([city_raw, a1_raw, a2_raw])):
+        return {"status": "valid", "address": None, "source": "intl",
+                "note": "ridicare de la oficiu curier (%s) — adresa stradală e irelevantă" % cc}
+    # 0b) BG: adresă GOALĂ (nicio literă în a1+a2 sau doar „няма") → CS, nimeni nu poate livra.
+    #     DOAR BG — în CZ satele livrează legitim pe număr-de-casă pur (a1='181').
+    if cc == "BG":
+        fa12 = _fold(a1_raw + " " + a2_raw)
+        if not re.search(r"[a-zа-я]", fa12) or (fa12.split() and set(fa12.split()) <= _NO_ADDR):
+            return {"status": "cs", "address": None, "source": "intl",
+                    "note": "adresă goală ('%s') → contact client (%s)" % (a1_raw[:30], cc)}
 
     def corrected(city_out, zip_out, note):
         return {"status": "corrected", "source": "intl",
@@ -215,12 +237,24 @@ def validate(cur, country, fields, policy=None):
 
     if owners:
         owner_norms = {o[1] for o in owners} | {o[2] for o in owners if o[2]}
-        # 1) o variantă a orașului clientului e chiar proprietarul codului → valid, nu schimb nimic
+        # localitățile PRIMARE distincte (CZ întoarce un rând per parte-comună → Praha×4 e TOT o localitate)
+        prim = {}
+        for disp, onorm, _alt in owners:
+            prim.setdefault(onorm, disp)
+        # 1) o variantă a orașului clientului e chiar proprietarul codului → valid, nu schimb nimic;
+        #    excepție CZ: match pe PARTEA-comună (cast_obce) → corectez orașul la OBEC (forma livrabilă)
         for cand in cands:
-            if cand in owner_norms:
-                note = _street_note(cur, cfg, cand if cand in {o[1] for o in owners} else
-                                    next(o[1] for o in owners if o[2] == cand), street, "valid (%s)" % cc)
-                return {"status": "valid", "address": None, "source": "intl", "note": note}
+            for disp, onorm, oalt in owners:
+                if cand == onorm:
+                    return {"status": "valid", "address": None, "source": "intl",
+                            "note": _street_note(cur, cfg, onorm, street, "valid (%s)" % cc)}
+            for disp, onorm, oalt in owners:
+                if oalt and cand == oalt:
+                    if cfg.get("part"):
+                        return corrected(disp, fields.get("zip"),
+                                         "parte-comună '%s' → obec '%s' (%s)" % (city_raw, disp, cc))
+                    return {"status": "valid", "address": None, "source": "intl",
+                            "note": _street_note(cur, cfg, onorm, street, "valid (%s, translit)" % cc)}
         # 1b) proprietarul e un sub-district al orașului clientului ("Košice" ⊂ "Košice-Barca") → valid
         for cand in cands:
             if len(cand) >= 4 and any(o[1].startswith(cand + " ") for o in owners):
@@ -259,17 +293,17 @@ def validate(cur, country, fields, policy=None):
                                  "cod poștal corectat din localitatea reală '%s' (%s): %s→%s"
                                  % (picked[0], cc, pc, picked[1]))
             break  # localitate reală dar codul nederivabil sigur → nu ghicesc, cad pe 5/6
-        # 5) cod cu UN singur proprietar, iar orașul clientului NU e o localitate reală → corectez orașul din cod
-        if len(owners) == 1:
-            disp = owners[0][0]
+        # 5) cod cu O SINGURĂ localitate primară, iar orașul clientului NU e o localitate reală → corectez din cod
+        if len(prim) == 1:
+            disp = next(iter(prim.values()))
             return corrected(disp, fields.get("zip"),
                              "oraș corectat din cod poștal (%s): '%s'→'%s'" % (cc, city_raw, disp))
-        # 6) ambiguu: mai mulți proprietari și orașul clientului nu seamănă cu niciunul
+        # 6) ambiguu: mai multe localități primare și orașul clientului nu seamănă cu niciuna
         if not city_raw.strip():
             return {"status": "cs", "address": None, "source": "intl",
-                    "note": "fără oraș, cod %s cu %d localități (%s) → CS" % (pc, len(owners), cc)}
+                    "note": "fără oraș, cod %s cu %d localități (%s) → CS" % (pc, len(prim), cc)}
         return {"status": "needs_geocoder", "address": None, "source": "intl",
-                "note": "oraș '%s' ≠ cod %s în %s (ambiguu, %d localități) → geocoder" % (city_raw, pc, cc, len(owners))}
+                "note": "oraș '%s' ≠ cod %s în %s (ambiguu, %d localități) → geocoder" % (city_raw, pc, cc, len(prim))}
 
     # — cod poștal lipsă / format greșit / inexistent —
     wellformed = len(pc) == cfg["pclen"]      # format OK dar negăsit în nomenclator (owners a fost gol)
