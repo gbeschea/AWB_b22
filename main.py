@@ -1,5 +1,6 @@
 # main.py
 
+import asyncio
 import os
 from urllib.parse import quote
 
@@ -20,7 +21,14 @@ from routes import (
     auth as auth_routes,
     api as api_routes,
     courier_actions as courier_actions_routes,
+    order_actions as order_actions_routes,
+    cs_queue as cs_queue_routes,
+    org as org_routes,
+    print_ops as print_ops_routes,
+    address_tools as address_tools_routes,
+    scan as scan_routes,
     spa as spa_routes,
+    legal as legal_routes,
 )
 from websocket_manager import manager
 from settings import settings
@@ -48,23 +56,29 @@ logger = logging.getLogger(__name__)
 # (comma-separated exact origins). With it unset we fall back to a dev-only regex that
 # matches any localhost/127.0.0.1 port.
 _cors_env = (os.environ.get("AWB_B2_CORS_ORIGINS") or "").strip()
+# Sidekick app-data tools run in Shopify's sandboxed browser and fetch this backend cross-origin.
+# Allow Shopify-owned sandbox origins — the request still carries an auto-attached session token that
+# require_shop validates, so CORS only decides which browser origins may READ the (already-authorized)
+# response. Kept as a regex since Shopify doesn't publish one fixed sandbox origin.
+_SHOPIFY_SANDBOX_RE = r"https://([a-z0-9-]+\.)*(shopifycdn\.com|shopifycloud\.com|shopify\.com)"
 if _cors_env:
     _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins,
+        allow_origin_regex=_SHOPIFY_SANDBOX_RE,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 else:
     logging.getLogger(__name__).warning(
-        "AWB_B2_CORS_ORIGINS not set — using dev-only localhost CORS. "
+        "AWB_B2_CORS_ORIGINS not set — using dev-only localhost + Shopify-sandbox CORS. "
         "Set an explicit allowlist in production."
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?|" + _SHOPIFY_SANDBOX_RE,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -77,23 +91,42 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(auth_routes.router)
 app.include_router(api_routes.router)
 app.include_router(courier_actions_routes.router)
-app.include_router(orders.router, tags=["Orders"])
-app.include_router(processing.router, tags=["Processing"])
-app.include_router(sync.router, tags=["Sync"])
-app.include_router(labels.router, tags=["Labels"])
-app.include_router(settings_router.router, tags=["Settings"])
-app.include_router(validation.router, tags=["Validation"])
+app.include_router(order_actions_routes.router)
+app.include_router(cs_queue_routes.router)
+app.include_router(cs_queue_routes.config_router)
+app.include_router(org_routes.router)
 app.include_router(webhooks.router, tags=["Webhooks"])
-app.include_router(couriers_routes.settings_router)
 app.include_router(couriers_routes.data_router)
-app.include_router(printing.router, tags=["Printing"])
-app.include_router(logs.router, tags=["Logs"])
-app.include_router(store_categories.router, tags=["Store Categories"])
+app.include_router(print_ops_routes.router)
+app.include_router(address_tools_routes.router)
+app.include_router(scan_routes.router)
 app.include_router(background.router, tags=["Background Tasks"])
-app.include_router(financials.router, tags=["Financials"])
-app.include_router(actions.router)
-app.include_router(profiles.html_router)
-app.include_router(profiles.api_router)
+app.include_router(legal_routes.router, tags=["Legal"])
+
+# ⛔ The LEGACY Jinja tool is deliberately NOT mounted.
+#
+# It predates the embedded Shopify app and was mounted alongside it with NO authentication of any
+# kind — no Depends, no middleware, no cookie check (the `awb_session` cookie is set at install and
+# read by nothing). Every one of its routes read and wrote the SAME multi-tenant tables as /api/*,
+# scoped to no store, so anonymous requests could:
+#   • read every merchant's decrypted Shopify access token + webhook HMAC secret (/settings/stores)
+#   • read and overwrite courier credentials (/settings/couriers…)
+#   • create REAL courier AWBs on any merchant's orders and any merchant's courier contract
+#     (/actions/create-awb, /processing/create-awbs — the latter never even recorded a Shipment,
+#     so those labels were invisible to the plan quota forever)
+#   • mark orders as paid via the merchant's own Admin token (/financials/mark-as-paid)
+#   • download label PDFs with customer PII and silently mark parcels printed (/labels/…)
+#   • trigger a full sync of every installed store (/sync/…)
+# Verified live before removal: every legacy HTML page already returned 500 (a Starlette/Jinja
+# TemplateResponse API break), so the UI was already dead — only the JSON endpoints still worked,
+# which is exactly the dangerous half. The React SPA calls ONLY /api/* (verified against
+# frontend/src), so nothing that works today depends on these.
+#
+# The modules still exist on disk; re-mounting ANY of them requires adding real auth
+# (Depends(require_shop)) AND org/store scoping to every query in them first.
+#   removed: orders, processing, sync, labels, settings, validation,
+#            couriers_routes.settings_router, printing, logs, store_categories,
+#            financials, actions, profiles (html_router/api_router are the same object)
 
 # Embedded React/Polaris SPA (served under /app). Mounted last so its /app/{path:path}
 # catch-all doesn't shadow the API/legacy routes above.
@@ -146,8 +179,30 @@ async def on_startup():
     async with engine.begin() as conn:
         await conn.execute(text(view_sql))
 
+    # Background courier-status → Shopify sync loop (single-runner via a pg advisory lock,
+    # so it's safe even if the app runs multiple workers). Toggle with AWB_STATUS_POLL_ENABLED=0.
+    if (os.environ.get("AWB_STATUS_POLL_ENABLED", "1").strip() != "0"):
+        from services import status_sync_service
+        try:
+            interval = int(os.environ.get("AWB_STATUS_POLL_INTERVAL_SEC", "900"))
+        except ValueError:
+            interval = 900
+        app.state.status_poll_task = asyncio.create_task(status_sync_service.poll_loop(interval))
+        logger.info("Status-sync background loop scheduled (interval=%ss).", interval)
+
+    # cron-parity SHADOW (duplicate / COD capture / surpriză / colete) — LOG-ONLY, paritate cu
+    # cronul xConnector; nu scrie nimic în Shopify. Activ doar cu CRON_PARITY_SHADOW=1.
+    if os.environ.get("CRON_PARITY_SHADOW") == "1":
+        from services.cron_parity import loop as cron_parity_loop
+        app.state.cron_parity_task = asyncio.create_task(cron_parity_loop.run_forever())
+        logger.info("cron-parity SHADOW loop scheduled.")
+
+
 @app.on_event("shutdown")
 async def on_shutdown():
+    task = getattr(app.state, "status_poll_task", None)
+    if task:
+        task.cancel()
     if couriers_http_client:
         try:
             await couriers_http_client.aclose()
