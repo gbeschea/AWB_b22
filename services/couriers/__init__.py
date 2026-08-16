@@ -7,6 +7,8 @@ from .packeta import PacketaCourier  # NEW
 from .econt import EcontCourier
 from .fancourier import FanCourier
 from .gls import GLSCourier
+from .testcourier import TestCourier
+from .xconnector import XConnectorCourier
 
 
 
@@ -24,6 +26,10 @@ _courier_instances = {
     "fancourier": _fancourier,
     "fan": _fancourier,  # alias
     "gls": GLSCourier(_http_client),
+    # Puntea xConnector — AWB + facturi prin API-ul xconnector.app (paritate cu cronul).
+    "xconnector": XConnectorCourier(_http_client),
+    # Test mode's sandbox courier (see testcourier.py) — never contacts anyone.
+    "test": TestCourier(_http_client),
 }
 
 _courier_instances.update({
