@@ -11,8 +11,9 @@ TMP=$(mktemp /tmp/.frisbo_sync.XXXX.json)
 trap 'rm -f "$TMP"' EXIT
 (cd "$KBDIR" && uv run kb.py secret-get FRISBO_ORG_TOKENS) > "$TMP"
 python3 -c "import json,sys; d=json.load(open('$TMP')); print('KB:', len(d), 'org-uri')"
+chmod 644 "$TMP"   # mktemp dă 0600 — în container appuser trebuie să-l poată citi
 scp -q "$TMP" "$BOX:/tmp/.frisbo_sync.json"
-ssh "$BOX" 'docker cp /tmp/.frisbo_sync.json orderhub-web:/tmp/.frisbo_sync.json && docker exec -i orderhub-web python - <<PY
+ssh "$BOX" 'chmod 644 /tmp/.frisbo_sync.json && docker cp /tmp/.frisbo_sync.json orderhub-web:/tmp/.frisbo_sync.json && docker exec -i orderhub-web python - <<PY
 import asyncio, json, sys
 sys.path.insert(0, "/app")
 from sqlalchemy import select
