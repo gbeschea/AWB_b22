@@ -17,7 +17,8 @@ import os, re, io, asyncio, unicodedata, urllib.request
 import osmium
 import asyncpg
 
-COUNTRIES = [("bulgaria", "bg_streets_osm"), ("hungary", "hu_streets"), ("slovakia", "sk_streets")]
+COUNTRIES = [("bulgaria", "bg_streets_osm"), ("hungary", "hu_streets"), ("slovakia", "sk_streets"),
+             ("moldova", "md_streets")]
 _num = re.compile(r"\d+")
 
 

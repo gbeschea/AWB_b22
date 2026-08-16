@@ -41,6 +41,7 @@ _CC = {
     "czechia": "CZ", "czech republic": "CZ", "cesko": "CZ", "ceska republika": "CZ", "cz": "CZ",
     "poland": "PL", "polska": "PL", "pl": "PL",
     "slovakia": "SK", "slovensko": "SK", "sk": "SK",
+    "moldova": "MD", "republica moldova": "MD", "moldova republic of": "MD", "md": "MD",
 }
 
 
@@ -69,6 +70,14 @@ CFG = {
     "SK": dict(pclen=5, tbl="sk_streets", city="city", city_norm="city_norm", street_norm="street_norm", pc="postcode",
                loc="sk_localities", loc_city="name", loc_norm="name_norm", loc_pc="postcode",
                fmt=lambda d: d[:3] + " " + d[3:], pc_complete=True, loc_cnt=None),
+    # MD: GeoNames (localitate+cod «MD-####») + OSM (străzi). Clienții scriu codul în orice format
+    # (2071 / MD2071 / MD-2071) — comparațiile sunt pe cifre; scrierea canonică rămâne pe cifre
+    # (paritate cu ce curge azi prin Frisbo). Cod DUBLAT des în address1 («... MD-2092») — inofensiv.
+    # pc_complete=False: GeoNames MD are DOAR codurile principale (Chișinău = doar MD-2000, fără
+    # micro-districtele 2059/2068/2069 — toate REALE) → un cod bine-format necunoscut se PĂSTREAZĂ.
+    "MD": dict(pclen=4, tbl="md_streets", city="city", city_norm="city_norm", street_norm="street_norm", pc="postcode",
+               loc="md_localities", loc_city="name", loc_norm="name_norm", loc_pc="postcode",
+               fmt=lambda d: d, pc_complete=False, loc_cnt=None),
 }
 
 # cuvinte tip-arteră intl de scos ca să rămână miezul străzii
@@ -84,8 +93,9 @@ _OFFICE_RE = re.compile(r"офис|еконт|спиди|автогара|кур
 # adresă GOALĂ/gunoi: fără nicio literă în a1+a2, sau markerul „nu am" — nimeni nu poate livra → CS
 _NO_ADDR = {"няма", "nyama", "nu am", "n a", "na", "nemam"}
 
-# prefixe de localitate (gr./с./кв./obec/miasto…), deja prin fold (fără diacritice, lowercase)
+# prefixe de localitate (gr./с./кв./obec/miasto/or./mun./com.…), deja prin fold (fără diacritice, lowercase)
 _CITY_PREFIX = {"gr", "s", "selo", "grad", "kv", "zh", "jk", "obec", "mesto", "miasto", "wies", "oras", "obl",
+                "or", "mun", "municipiul", "com", "comuna", "sat", "satul", "raionul", "raion",
                 "гр", "с", "село", "кв", "ж",
                 "град", "обл"}
 _ROMAN = re.compile(r"^[ivxlcdm]{1,4}$")
@@ -96,6 +106,24 @@ def _street_core(a1):
     s = _STREETWORDS.sub(" ", s)
     s = re.sub(r"\d.*$", "", s)            # scot numărul casei + tot ce urmează
     return re.sub(r"\s+", " ", s).strip()
+
+
+# MD: numele RUSEȘTI ale localităților (folded) → forma latină din GeoNames. Rusa e a doua limbă
+# a comenzilor duppo.md; numele rusești NU-s transliterări simple (Кишинёв≠«Chișinău» transliterat).
+_MD_RU = {
+    "кишинев": "chisinau", "кишинэу": "chisinau", "бельцы": "balti", "бэлць": "balti",
+    "тирасполь": "tiraspol", "бендеры": "bender", "тигина": "tighina", "комрат": "comrat",
+    "кагул": "cahul", "оргеев": "orhei", "сороки": "soroca", "унгены": "ungheni",
+    "дурлешты": "durlesti", "ставчены": "stauceni", "яловены": "ialoveni", "хынчешты": "hincesti",
+    "страшены": "straseni", "стрэшены": "straseni", "криково": "cricova", "кодру": "codru",
+    "дубоссары": "dubasari", "рыбница": "ribnita", "единцы": "edinet", "чадыр лунга": "ceadir lunga",
+    "тараклия": "taraclia", "флорешты": "floresti", "дрокия": "drochia", "каушаны": "causeni",
+    "кэушень": "causeni", "вулканешты": "vulcanesti", "отачь": "otaci", "атаки": "otaci",
+    "резина": "rezina", "глодяны": "glodeni", "ниспорены": "nisporeni", "теленешты": "telenesti",
+    "шолданешты": "soldanesti", "бричаны": "briceni", "окница": "ocnita", "сынджера": "singera",
+    "криуляны": "criuleni", "анений ной": "anenii noi", "калараш": "calarasi", "леова": "leova",
+    "кантемир": "cantemir", "басарабяска": "basarabeasca", "фалешты": "falesti", "чимишлия": "cimislia",
+}
 
 
 def city_candidates(city_raw):
@@ -147,9 +175,11 @@ def _locality_pcs(cur, cfg, cand):
     lc, ln, lp = cfg.get("loc_city", cfg["city"]), cfg.get("loc_norm", cfg["city_norm"]), cfg.get("loc_pc", cfg["pc"])
     lat, cnt = cfg.get("lat"), cfg.get("loc_cnt")
     cntcol = "sum(coalesce(%s,1))" % cnt if cnt else "count(*)"
-    # match și pe varianta cu cratime→spații (convențiile *_norm stocate diferă între loadere)
-    where = "%s=%%s or replace(%s,'-',' ')=%%s" % (ln, ln) + (" or lower(%s)=%%s" % lat if lat else "")
-    args = (cand, cand, cand) if lat else (cand, cand)
+    # match și pe varianta cu cratime→spații (convențiile *_norm diferă între loadere) + pe oficiile
+    # poștale NUMEROTATE din GeoNames ('Cahul' → 'Cahul 1'…'Cahul 9')
+    where = ("%s=%%s or replace(%s,'-',' ')=%%s or %s ~ ('^' || %%s || ' [0-9]+$')" % (ln, ln, ln)
+             + (" or lower(%s)=%%s" % lat if lat else ""))
+    args = (cand, cand, cand, cand) if lat else (cand, cand, cand)
     cur.execute("select max(%s), regexp_replace(%s,'\\D','','g') as pcd, %s from %s where (%s) and %s is not null "
                 "group by pcd order by 3 desc" % (lc, lp, cntcol, lt, where, lp), args)
     return [(r[0], r[1], int(r[2])) for r in cur.fetchall() if r[1]]
@@ -215,6 +245,12 @@ def validate(cur, country, fields, policy=None):
     a1_raw = fields.get("address1") or ""
     a2_raw = fields.get("address2") or ""
     cands = city_candidates(city_raw)
+    if cc == "MD":
+        # extinde candidații cu formele latine ale numelor rusești (Кишинев→chisinau)
+        for c in list(cands):
+            al = _MD_RU.get(c)
+            if al and al not in cands:
+                cands.append(al)
 
     # 0) BG: ridicare de la OFICIU de curier → valid direct (paritate producție; HERE le-ar respinge degeaba)
     if cc == "BG" and _OFFICE_RE.search(" ".join([city_raw, a1_raw, a2_raw])):
@@ -274,8 +310,21 @@ def validate(cur, country, fields, policy=None):
             if onorm and len(onorm) >= 4 and (" " + onorm + " ") in fa1:
                 return corrected(disp, fields.get("zip"),
                                  "oraș corectat din address1+cod (%s): '%s'→'%s'" % (cc, city_raw, disp))
+        # 3b) address1 conține un SAT/localitate REALĂ ale cărei coduri includ ZIP-ul clientului →
+        #     adresa e COERENTĂ (câmpul oraș = raionul/orașul-mamă, satul e în a1) → valid as-is.
+        #     (ex MD: city='Cahul' zip=3925 a1='Satul Pașcani Raionul Cahul' — 3925 e al Pașcani-ului.)
+        fa1_toks = [t for t in _fold(a1_raw).split() if len(t) >= 5]
+        for tok in fa1_toks[:8]:
+            if any(tok == c for c in cands):
+                continue                          # e chiar orașul din câmp, nu un sat distinct
+            locs = _locality_pcs(cur, cfg, tok)
+            if locs and pc in {p for _, p, _ in locs}:
+                return {"status": "valid", "address": None, "source": "intl",
+                        "note": "valid (%s): codul %s e al localității '%s' din address1 (câmpul oraș = raion)"
+                                % (cc, pc, locs[0][0])}
         # 4) orașul clientului e localitate REALĂ care NU deține codul → păstrez ORAȘUL, corectez CODUL
-        #    (lecția RO #559 / CZ city-safe: nu remuta clientul în alt sat pe baza unui ZIP typo)
+        #    (lecția RO #559 / CZ city-safe: nu remuta clientul în alt sat pe baza unui ZIP typo).
+        #    Localitate reală dar cod nederivabil SIGUR → geocoder direct (nu cad pe redenumirea din 5).
         for cand in cands:
             locs = _locality_pcs(cur, cfg, cand)
             if not locs:
@@ -288,11 +337,28 @@ def validate(cur, country, fields, policy=None):
                                      "cod poștal corectat din strada localității '%s' (%s): %s→%s"
                                      % (disp, cc, pc, spcs[0]))
             picked = _pick_pc(locs, pc)
+            # poarta TYPO: rescriu codul DOAR dacă e aproape-identic (același district poștal,
+            # prefix comun ≥ pclen-1: 2231→2230 da; 2071→2000 NU — poate fi gaură de date, nu typo)
             if picked and picked[1] != pc:
-                return corrected(city_raw, cfg["fmt"](picked[1]),
-                                 "cod poștal corectat din localitatea reală '%s' (%s): %s→%s"
-                                 % (picked[0], cc, pc, picked[1]))
-            break  # localitate reală dar codul nederivabil sigur → nu ghicesc, cad pe 5/6
+                npfx = 0
+                for a, b in zip(pc, picked[1]):
+                    if a != b:
+                        break
+                    npfx += 1
+                if npfx >= cfg["pclen"] - 1:
+                    return corrected(city_raw, cfg["fmt"](picked[1]),
+                                     "cod poștal corectat din localitatea reală '%s' (%s): %s→%s"
+                                     % (picked[0], cc, pc, picked[1]))
+            if not cfg["pc_complete"]:
+                # date INCOMPLETE (BG/PL/MD): cod REAL + oraș REAL + mismatch = cel mai probabil gaură
+                # de date (Chișinău are 2059/2068/2071… dar GeoNames doar 2000) → PĂSTREZ (FREE-FIRST)
+                return {"status": "valid", "address": None, "source": "intl",
+                        "note": _street_note(cur, cfg, _fold(disp), street,
+                                             "oraș real '%s', cod %s real dar nemapat la el în nomenclatorul %s (incomplet) → păstrat"
+                                             % (disp, pc, cc))}
+            return {"status": "needs_geocoder", "address": None, "source": "intl",
+                    "note": "oraș real '%s' dar codul %s e al altei localități și nu-l pot deriva sigur (%s) → geocoder"
+                            % (disp, pc, cc)}
         # 5) cod cu O SINGURĂ localitate primară, iar orașul clientului NU e o localitate reală → corectez din cod
         if len(prim) == 1:
             disp = next(iter(prim.values()))

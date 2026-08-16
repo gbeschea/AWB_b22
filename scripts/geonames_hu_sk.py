@@ -42,7 +42,7 @@ async def main():
     u = re.sub(r"^postgresql(\+\w+)?://", "postgresql://", os.environ["DATABASE_URL"])
     c = await asyncpg.connect(u)
     try:
-        for country, tbl in (("HU", "hu_localities"), ("SK", "sk_localities")):
+        for country, tbl in (("HU", "hu_localities"), ("SK", "sk_localities"), ("MD", "md_localities")):
             rows = fetch(country)
             await c.execute(DDL.format(t=tbl))
             async with c.transaction():
