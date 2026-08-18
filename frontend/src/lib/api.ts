@@ -1127,6 +1127,22 @@ export function saveInvoiceSettings(s: Partial<InvoiceSettings>) {
     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s),
   });
 }
+
+// --- Automation schedule (per store: mode on_order|cron|on_delivered|off + minutes; risk actions) ---
+export interface ScheduleEntry { mode: string; minutes: number; }
+export interface AutomationSchedule {
+  duplicates: ScheduleEntry; parcels: ScheduleEntry; surprise: ScheduleEntry;
+  blocklist: ScheduleEntry; risk: ScheduleEntry; cod_capture: ScheduleEntry; awb: ScheduleEntry;
+  risk_actions: { medium: string; high: string };
+}
+export function getAutomationSchedule() {
+  return authFetch<AutomationSchedule>(`/api/automation-schedule`);
+}
+export function saveAutomationSchedule(s: Partial<AutomationSchedule>) {
+  return authFetch<{ success: boolean; automation_schedule: AutomationSchedule }>(`/api/automation-schedule`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s),
+  });
+}
 export function getSmartbillSeries() {
   return authFetch<{ configured: boolean; series: { name: string; next: string | number }[]; error?: string }>(
     `/api/smartbill/series`);
