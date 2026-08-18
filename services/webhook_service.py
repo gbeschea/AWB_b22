@@ -307,8 +307,25 @@ async def _enrich_product_tags(store_id: int, order_id: int) -> None:
             need = [li.sku for li in order.line_items if li.sku and not li.product_tags]
             if not need:
                 return
-            from services import shopify_service
-            tag_map = await shopify_service.get_variant_product_tags(store, need)
+            # DB-FIRST („nu ai deja datele?" — ba da): același SKU apare pe sute de comenzi vechi ale
+            # magazinului, cu tag-urile deja salvate. Le refolosim din istoricul propriu; Shopify e apelat
+            # DOAR pentru SKU-uri pe care nu le-am văzut niciodată (produs nou) → aproape zero apeluri.
+            known_rows = (await db.execute(
+                select(models.LineItem.sku, models.LineItem.product_tags)
+                .join(models.Order, models.LineItem.order_id == models.Order.id)
+                .where(models.Order.store_id == store.id,
+                       models.LineItem.sku.in_(need),
+                       models.LineItem.product_tags.isnot(None))
+                .order_by(models.LineItem.id.desc())
+                .limit(500)
+            )).all()
+            tag_map: dict = {}
+            for sku, tags in known_rows:                      # primul văzut = cel mai recent (desc)
+                tag_map.setdefault((sku or "").strip().lower(), tags)
+            missing = [s for s in need if (s or "").strip().lower() not in tag_map]
+            if missing:
+                from services import shopify_service
+                tag_map.update(await shopify_service.get_variant_product_tags(store, missing))
             changed = False
             for li in order.line_items:
                 if li.sku and not li.product_tags:
