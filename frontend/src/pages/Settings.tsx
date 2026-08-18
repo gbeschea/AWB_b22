@@ -69,6 +69,7 @@ import {
 } from "../lib/api";
 import { InvoiceSettingsCard } from "../components/InvoiceSettingsCard";
 import { AutomationScheduleCard } from "../components/AutomationScheduleCard";
+import { getLang, setLang } from "../lib/i18n";
 
 const HOURS = Array.from({ length: 24 }, (_, h) => ({ label: `${String(h).padStart(2, "0")}:00`, value: String(h) }));
 const DELAY_OPTIONS = [
@@ -1541,7 +1542,8 @@ export default function Settings() {
   const tabIndex = Math.max(0, TABS.findIndex((t) => t.id === (searchParams.get("tab") || "couriers")));
 
   return (
-    <Page fullWidth title="Settings" subtitle="Couriers, shipping, automation, invoicing and multi-store.">
+    <Page fullWidth title="Settings" subtitle="Couriers, shipping, automation, invoicing and multi-store."
+      secondaryActions={[{ content: getLang() === "ro" ? "🌐 English" : "🌐 Română", onAction: () => setLang(getLang() === "ro" ? "en" : "ro") }]}>
       <BlockStack gap="400">
         {error && (
           <Banner tone="critical" title="Couldn't load settings" onDismiss={() => setError(null)}>

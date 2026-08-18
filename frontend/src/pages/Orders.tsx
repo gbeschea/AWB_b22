@@ -65,6 +65,8 @@ import {
   type ShipmentProfile,
   type TimelineEvent,
 } from "../lib/api";
+import { t } from "../lib/i18n";
+import { setOrderNote } from "../lib/api";
 import { OrderEditModal } from "../components/OrderEditModal";
 import { ManualAwbModal } from "../components/ManualAwbModal";
 import { AddressEditor } from "../components/AddressEditor";
@@ -249,27 +251,27 @@ type RowMenuItem = { content: string; destructive?: boolean; disabled?: boolean;
 type ColId = "order" | "status" | "payment" | "fulfilment" | "store" | "customer" | "date"
   | "total" | "products" | "address" | "awb" | "invoice";
 const ALL_COLUMNS: { id: ColId; label: string; always?: boolean; end?: boolean; multiStoreOnly?: boolean }[] = [
-  { id: "order", label: "Order", always: true },
-  { id: "status", label: "Status" },
-  { id: "payment", label: "Payment" },
-  { id: "fulfilment", label: "Fulfilment" },
-  { id: "store", label: "Store", multiStoreOnly: true },
-  { id: "customer", label: "Customer" },
-  { id: "date", label: "Date" },
-  { id: "total", label: "Total", end: true },
-  { id: "products", label: "Products" },
-  { id: "address", label: "Address" },
-  { id: "awb", label: "Courier / AWB" },
-  { id: "invoice", label: "Invoice" },
+  { id: "order", label: t("col.order"), always: true },
+  { id: "status", label: t("col.status") },
+  { id: "payment", label: t("col.payment") },
+  { id: "fulfilment", label: t("col.fulfilment") },
+  { id: "store", label: t("col.store"), multiStoreOnly: true },
+  { id: "customer", label: t("col.customer") },
+  { id: "date", label: t("col.date") },
+  { id: "total", label: t("col.total"), end: true },
+  { id: "products", label: t("col.products") },
+  { id: "address", label: t("col.address") },
+  { id: "awb", label: t("col.awb") },
+  { id: "invoice", label: t("col.invoice") },
 ];
 const DEFAULT_COLS: ColId[] = ["order", "payment", "fulfilment", "store", "customer",
   "total", "awb", "invoice"];
 /** The old Compact / Detailed toggle, kept as one-click presets on top of the column chooser —
  *  the two view modes people already knew, without losing per-column control. */
 const COL_PRESETS: { id: "compact" | "default" | "detailed"; label: string; cols: ColId[] }[] = [
-  { id: "compact", label: "Compact", cols: ["order", "payment", "fulfilment", "total", "awb"] },
-  { id: "default", label: "Default", cols: DEFAULT_COLS },
-  { id: "detailed", label: "Detailed",
+  { id: "compact", label: t("cols.compact"), cols: ["order", "payment", "fulfilment", "total", "awb"] },
+  { id: "default", label: t("cols.default"), cols: DEFAULT_COLS },
+  { id: "detailed", label: t("cols.detailed"),
     cols: ["order", "status", "payment", "fulfilment", "store", "customer", "date", "total",
       "products", "address", "awb", "invoice"] },
 ];
@@ -281,7 +283,7 @@ function paymentState(o: OrderRow): { label: string; tone: StatusTone } {
   const fin = (o.financial_status || "").toLowerCase();
   if (o.financial_paid || fin === "paid") return { label: "Paid", tone: "success" };
   if (fin.includes("refund")) return { label: fin.includes("partial") ? "Part. refunded" : "Refunded", tone: "critical" };
-  if (fin === "pending" || !fin) return { label: "COD due", tone: "attention" };
+  if (fin === "pending" || !fin) return { label: t("pay.pending"), tone: "attention" };
   if (fin === "authorized") return { label: "Authorized", tone: "info" };
   return { label: fin.replace(/_/g, " "), tone: "warning" };
 }
@@ -464,13 +466,14 @@ const OrderTableRow = memo(function OrderTableRow({
     </IndexTable.Row>
     {/* Expand pe click (stil AWB Arona): conținutul comenzii + adresa completă, fără fetch — totul e pe rând. */}
     {expanded && (
-      <IndexTable.Row id={`${o.id}-detail`} position={index} rowType="child" onClick={() => onToggleExpand(o.id)}>
+      <IndexTable.Row id={`${o.id}-detail`} position={index} rowType="child" hideSelectable
+        onClick={() => onToggleExpand(o.id)}>
         <IndexTable.Cell colSpan={cols.length + 2}>
           <div onClick={(e) => e.stopPropagation()}
             style={{ display: "flex", gap: 32, padding: "10px 4px 12px", flexWrap: "wrap",
                      background: "var(--p-color-bg-surface-secondary)", borderRadius: 8 }}>
             <div style={{ minWidth: 260, flex: "1 1 300px", paddingLeft: 8 }}>
-              <Text as="p" variant="bodySm" tone="subdued" fontWeight="semibold">Produse ({o.line_count})</Text>
+              <Text as="p" variant="bodySm" tone="subdued" fontWeight="semibold">{t("exp.products")} ({o.line_count})</Text>
               <div style={PRODUCT_LINES}>
                 {(o.items || []).map((it, k) => (
                   <div key={k}>{it.quantity ?? 1} × {it.title ?? "—"}{it.sku ? `  (${it.sku})` : ""}</div>
@@ -478,7 +481,7 @@ const OrderTableRow = memo(function OrderTableRow({
               </div>
             </div>
             <div style={{ minWidth: 240, flex: "1 1 260px" }}>
-              <Text as="p" variant="bodySm" tone="subdued" fontWeight="semibold">Adresă</Text>
+              <Text as="p" variant="bodySm" tone="subdued" fontWeight="semibold">{t("exp.address")}</Text>
               <div style={PRODUCT_LINES}>
                 {a?.name && <div>{a.name}</div>}
                 {a?.address1 && <div>{a.address1}{a.address2 ? `, ${a.address2}` : ""}</div>}
@@ -487,12 +490,15 @@ const OrderTableRow = memo(function OrderTableRow({
               </div>
             </div>
             <div style={{ minWidth: 200, flex: "1 1 220px" }}>
-              <Text as="p" variant="bodySm" tone="subdued" fontWeight="semibold">Stare</Text>
+              <InlineStack gap="200" blockAlign="center">
+                <Text as="p" variant="bodySm" tone="subdued" fontWeight="semibold">{t("exp.state")}</Text>
+                <Button size="micro" onClick={() => onDetail(o.id)}>{t("exp.edit")}</Button>
+              </InlineStack>
               <div style={PRODUCT_LINES}>
                 <div>{pay.label} · {ful.label}</div>
                 {o.awb && <div>AWB: {o.awb} ({o.courier || "?"})</div>}
-                {o.invoice_number && <div>Factură: {o.invoice_number}</div>}
-                <div>Total: {o.total_price != null ? o.total_price.toFixed(2) : "—"}</div>
+                {o.invoice_number && <div>{t("exp.invoice")}: {o.invoice_number}</div>}
+                <div>{t("exp.total")}: {o.total_price != null ? o.total_price.toFixed(2) : "—"}</div>
               </div>
             </div>
           </div>
@@ -737,7 +743,7 @@ export default function Orders() {
       const c = ALL_COLUMNS.find((x) => x.id === id)!;
       return c.end ? { title: c.label, alignment: "end" as const } : { title: c.label };
     }),
-    { title: "Actions", alignment: "end" as const },
+    { title: t("col.actions"), alignment: "end" as const },
   ];
   const toggleCol = (id: ColId) => {
     setCols((prev) => {
@@ -782,12 +788,12 @@ export default function Orders() {
   };
 
   const lensTabs = [
-    { id: "all", content: "All" },
-    { id: "unfulfilled", content: "Unfulfilled" },
-    { id: "fulfilled", content: "Fulfilled" },
-    { id: "in_transit", content: "In transit" },
-    { id: "delivered", content: "Delivered" },
-    { id: "refused", content: "Refused" },
+    { id: "all", content: t("lens.all") },
+    { id: "unfulfilled", content: t("lens.unfulfilled") },
+    { id: "fulfilled", content: t("lens.fulfilled") },
+    { id: "in_transit", content: t("lens.in_transit") },
+    { id: "delivered", content: t("lens.delivered") },
+    { id: "refused", content: t("lens.refused") },
   ];
   const lensIndex = Math.max(0, lensTabs.findIndex((t) => t.id === lens));
 
@@ -1025,6 +1031,8 @@ export default function Orders() {
   const [manualFor, setManualFor] = useState<OrderRow | null>(null);
   // "Edit / swap order" modal.
   const [editFor, setEditFor] = useState<OrderRow | null>(null);
+  const [noteDraft, setNoteDraft] = useState<string | null>(null);
+  const [noteSaving, setNoteSaving] = useState(false);
 
   const rowMenuItems = useCallback((o: OrderRow) => {
     const items: { content: string; destructive?: boolean; disabled?: boolean; onAction: () => void }[] = [];
@@ -1094,6 +1102,7 @@ export default function Orders() {
   }, []);
 
   const openDetail = useCallback(async (id: number) => {
+    setNoteDraft(null);
     setDetailOpen(true);
     setDetail(null);
     setDetailLoading(true);
@@ -1410,13 +1419,13 @@ export default function Orders() {
               onClose={() => setColsOpen(false)}
               activator={
                 <Button disclosure onClick={() => setColsOpen(!colsOpen)}>
-                  {`Columns (${visibleCols.length})`}
+                  {`${t("cols.button")} (${visibleCols.length})`}
                 </Button>
               }
             >
               <Box padding="300" minWidth="230px">
                 <BlockStack gap="200">
-                  <Text as="p" variant="bodySm" tone="subdued">View</Text>
+                  <Text as="p" variant="bodySm" tone="subdued">{t("cols.view")}</Text>
                   <ButtonGroup variant="segmented">
                     {COL_PRESETS.map((p) => {
                       const active = p.cols.length === visibleCols.length
@@ -1431,7 +1440,7 @@ export default function Orders() {
                   </ButtonGroup>
                   {Object.keys(views).length > 0 && (
                     <>
-                      <Text as="p" variant="bodySm" tone="subdued">Saved views</Text>
+                      <Text as="p" variant="bodySm" tone="subdued">{t("views.saved")}</Text>
                       {Object.keys(views).map((name) => (
                         <InlineStack key={name} gap="100" blockAlign="center" wrap={false}>
                           <div style={{ flex: 1 }}>
@@ -1446,13 +1455,13 @@ export default function Orders() {
                   )}
                   <InlineStack gap="100" blockAlign="center" wrap={false}>
                     <div style={{ flex: 1 }}>
-                      <TextField label="Save view" labelHidden placeholder="Nume view…" autoComplete="off"
+                      <TextField label="Save view" labelHidden placeholder={t("views.name")} autoComplete="off"
                         value={viewName} onChange={setViewName} />
                     </div>
-                    <Button size="slim" onClick={saveView} disabled={!viewName.trim()}>Save</Button>
+                    <Button size="slim" onClick={saveView} disabled={!viewName.trim()}>{t("views.save")}</Button>
                   </InlineStack>
                   <Divider />
-                  <Text as="p" variant="bodySm" tone="subdued">Show these columns (↑↓ = ordinea)</Text>
+                  <Text as="p" variant="bodySm" tone="subdued">{t("cols.show")}</Text>
                   {/* Checked columns in the USER'S order (with ↑/↓), then the unchecked ones. */}
                   {[
                     ...ALL_COLUMNS.filter((c) => c.always),
@@ -1855,7 +1864,27 @@ export default function Orders() {
                   </div>
                 ))}
               </BlockStack>
-              {detail.note && <Text as="p" tone="subdued">Note: {detail.note}</Text>}
+              <BlockStack gap="100">
+                <Text as="h3" variant="headingSm">{t("note.title")}</Text>
+                <InlineStack gap="200" blockAlign="end" wrap={false}>
+                  <div style={{ flex: 1 }}>
+                    <TextField label={t("note.title")} labelHidden multiline={2} autoComplete="off"
+                      placeholder={t("note.placeholder")}
+                      value={noteDraft ?? (detail.note || "")}
+                      onChange={(v) => setNoteDraft(v)} />
+                  </div>
+                  <Button size="slim" loading={noteSaving}
+                    disabled={noteDraft == null || noteDraft === (detail.note || "")}
+                    onClick={() => {
+                      if (noteDraft == null) return;
+                      setNoteSaving(true);
+                      setOrderNote(detail.id, noteDraft)
+                        .then(() => { setDetail((d) => (d ? { ...d, note: noteDraft } : d)); setNoteDraft(null); })
+                        .catch((e) => alert(String((e as Error).message || e)))
+                        .finally(() => setNoteSaving(false));
+                    }}>{t("views.save")}</Button>
+                </InlineStack>
+              </BlockStack>
 
               <BlockStack gap="150">
                 <Text as="h3" variant="headingSm">Timeline</Text>
