@@ -109,6 +109,12 @@ async def upsert_order_from_webhook(
     is_new = order is None
     if is_new:
         order = models.Order(store_id=store.id, shopify_order_id=shopify_id)
+        # Init collections as loaded-empty: a NEW order has a PK only after flush, and any later access
+        # to an UNLOADED relationship (order.shipments in calculate_and_set_derived_status, order.line_items
+        # in the tag rebuild) then lazy-loads in the async session → MissingGreenlet, which poisons the
+        # session so the whole webhook 500s. Existing orders are selectinload'd above.
+        order.line_items = []
+        order.shipments = []
         db.add(order)
 
     include_pii = (getattr(store, "pii_source", "") or "").lower() == "shopify"
@@ -156,14 +162,14 @@ async def upsert_order_from_webhook(
         order.shipping_province = sa.get("province")
         order.shipping_country = sa.get("country")
 
-    # Need the PK before appending children on a new row.
-    await db.flush()
-
     # Line items — the webhook payload is authoritative; rebuild the set.
     line_items = payload.get("line_items") or []
+    # Rebuild the whole line-item set BEFORE db.flush(): on a pending NEW order there is no PK yet, so
+    # touching order.line_items returns the in-memory collection WITHOUT a query; AFTER the flush it
+    # would lazy-load in the async session → MissingGreenlet (an orders/updated for an order OH hasn't
+    # synced yet 500s). Existing orders are selectinload'd. The flush then persists order + children
+    # together (the relationship cascades the FK — the PK is NOT needed before appending).
     if line_items:
-        # Preserve already-fetched product tags across the rebuild so we don't re-query Shopify
-        # on every orders/updated delivery (tags rarely change; only new SKUs need a fetch).
         prev_tags = {(li.sku or "").strip().lower(): li.product_tags
                      for li in order.line_items if li.sku and li.product_tags}
         order.line_items.clear()
@@ -176,6 +182,11 @@ async def upsert_order_from_webhook(
                     product_tags=prev_tags.get((item.get("sku") or "").strip().lower()),
                 )
             )
+
+    # PK + children flushed together.
+    await db.flush()
+
+    if line_items:
         # Enrich the Shopify product tags for any SKU we don't already have them for (best-effort;
         # a failure just leaves them NULL for the backfill endpoint to pick up later).
         need = [li.sku for li in order.line_items if li.sku and not li.product_tags]
