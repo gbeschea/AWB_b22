@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  BlockStack, Button, Card, InlineGrid, InlineStack, Select, Text, TextField,
+  BlockStack, Button, Card, Checkbox, InlineGrid, InlineStack, Select, Text, TextField,
 } from "@shopify/polaris";
 import { getAutomationSchedule, saveAutomationSchedule, type AutomationSchedule } from "../lib/api";
 
@@ -89,6 +89,16 @@ export function AutomationScheduleCard() {
             </InlineGrid>
           );
         })}
+
+        <BlockStack gap="100">
+          <Text as="h3" variant="headingSm">Fără hold-uri (internațional)</Text>
+          <Checkbox
+            label="Nu lăsa comenzi pe hold — încearcă să trimiți tot; ce nu se poate → anulează"
+            checked={!!cfg.no_hold}
+            onChange={(v) => setCfg((c) => (c ? { ...c, no_hold: v } : c))}
+            helpText="Pentru magazine fără CS (internaționale): orice hold (risc mediu / duplicat cu sumă diferită) devine trimite; clienții blocați / risc mare / adresă imposibilă → anulare."
+          />
+        </BlockStack>
 
         <BlockStack gap="100">
           <Text as="h3" variant="headingSm">Acțiuni la risc de comandă</Text>

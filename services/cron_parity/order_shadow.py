@@ -83,19 +83,23 @@ async def _duplicates(db, store, order) -> bool:
     added = False
     for o, decision, why in duplicates.resolve_group(grp):
         logger.info("ORDER-dup store=%s order=%s -> %s (%s)", o.store_id, o.name, decision, why)
-        if decision == "held" and not no_cs(store):
-            exists = (await db.execute(
-                select(models.CSQueueItem.id).where(models.CSQueueItem.order_id == o.id))).first()
-            if not exists:
-                db.add(models.CSQueueItem(store_id=o.store_id, order_id=o.id, reason="duplicate",
-                                          status="open", reason_detail=why, created_by="auto"))
-                added = True
+        if decision == "held":
+            # dup-sumă-diferită = poate fi comandă reală → normal HOLD la CS. Pe magazinele fără CS
+            # (international) nu ținem hold-uri: încercăm să trimitem (would-ship).
+            if automation_config.effective_action(store, "hold") == "ship":
+                logger.info("ORDER-dup store=%s order=%s -> would-SHIP (dup-suma-diferita, fara hold)",
+                            o.store_id, o.name)
+            elif not no_cs(store):
+                exists = (await db.execute(
+                    select(models.CSQueueItem.id).where(models.CSQueueItem.order_id == o.id))).first()
+                if not exists:
+                    db.add(models.CSQueueItem(store_id=o.store_id, order_id=o.id, reason="duplicate",
+                                              status="open", reason_detail=why, created_by="auto"))
+                    added = True
     return added
 
 
 async def _blocklist(db, store, order) -> bool:
-    if no_cs(store):
-        return False
     cfg = await resolver.resolve_capability(db, store, "blocklist")
     if not cfg.get("enabled"):
         return False
@@ -110,6 +114,10 @@ async def _blocklist(db, store, order) -> bool:
         if ph in serial:
             why = "serial-refuser (>=%d refuzuri)" % threshold
     if not why:
+        return False
+    if automation_config.close_instead_of_hold(store):
+        # international / fără CS: client blocat = „nu putem trimite" → would-CANCEL (nu hold la o coadă nelucrată)
+        logger.info("ORDER-block store=%s order=%s -> would-CANCEL (block, fara CS: %s)", store.id, order.name, why)
         return False
     logger.info("ORDER-block store=%s order=%s -> would-block (%s)", store.id, order.name, why)
     exists = (await db.execute(
@@ -143,9 +151,10 @@ async def _risk(db, store, order) -> bool:
     action = automation_config.risk_actions(store).get(level, "none")
     if action == "none":
         return False
+    action = automation_config.effective_action(store, action)   # international: hold -> ship (trimitem tot)
     logger.info("ORDER-risk store=%s order=%s -> would-%s (risc=%s, %d refuzuri in grup)",
-                store.id, order.name, action, level, n)
-    return False   # shadow: doar log; hold/cancel real la go-live
+                store.id, order.name, action.upper(), level, n)
+    return False   # shadow: doar log; ship/hold/cancel real la go-live
 
 
 _HANDLERS = {

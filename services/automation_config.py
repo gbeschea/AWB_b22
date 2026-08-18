@@ -53,6 +53,29 @@ def minutes_of(store, key: str) -> int:
         return int(d.get("minutes", 0) or 0)
 
 
+def close_instead_of_hold(store) -> bool:
+    """REGULA „fără hold-uri": magazinele fără CS care lucrează coada (internaționale / NO_CS) NU lasă
+    comenzi pe HOLD — n-are cine să le rezolve → orice „hold" devine „cancel" (close). Setare per magazin
+    `automation_schedule.no_hold`; default = magazin fără coadă CS (services.utils.no_cs)."""
+    v = _sched(store).get("no_hold")
+    if isinstance(v, bool):
+        return v
+    try:
+        from services.utils import no_cs
+        return bool(no_cs(store))
+    except Exception:
+        return False
+
+
+def effective_action(store, action: str) -> str:
+    """REGULA pe magazinele fără CS (internaționale): NU lăsăm HOLD-uri — încercăm să TRIMITEM tot.
+    `hold` → `ship` (lasă comanda să meargă la AWB); `cancel` rămâne `cancel` (ce NU putem trimite:
+    dubluri adevărate, risc mare, clienți blocați, adresă imposibilă)."""
+    if action == "hold" and close_instead_of_hold(store):
+        return "ship"
+    return action
+
+
 def risk_actions(store) -> Dict[str, str]:
     ra = _sched(store).get("risk_actions") or {}
     out = {}
@@ -75,6 +98,7 @@ def merged_schedule(store) -> Dict[str, Any]:
                 except Exception:
                     pass
     out["risk_actions"] = risk_actions(store)
+    out["no_hold"] = close_instead_of_hold(store)
     return out
 
 
@@ -100,4 +124,6 @@ def sanitize(payload: Dict[str, Any]) -> Dict[str, Any]:
         rc = {lvl: ra[lvl] for lvl in ("medium", "high") if ra.get(lvl) in VALID_ACTIONS}
         if rc:
             clean["risk_actions"] = rc
+    if isinstance(payload.get("no_hold"), bool):
+        clean["no_hold"] = payload["no_hold"]
     return clean

@@ -1134,6 +1134,7 @@ export interface AutomationSchedule {
   duplicates: ScheduleEntry; parcels: ScheduleEntry; surprise: ScheduleEntry;
   blocklist: ScheduleEntry; risk: ScheduleEntry; cod_capture: ScheduleEntry; awb: ScheduleEntry;
   risk_actions: { medium: string; high: string };
+  no_hold?: boolean;
 }
 export function getAutomationSchedule() {
   return authFetch<AutomationSchedule>(`/api/automation-schedule`);
