@@ -30,3 +30,7 @@ CREATE INDEX IF NOT EXISTS ix_print_logs_store_id ON print_logs (store_id);
 -- — e aplicația noastră pe magazinele noastre; comisionul Shopify pe bani circulari n-are sens. entitled_plan_key()
 -- îl respectă; instalările EXTERNE rămân default false (se abonează sau stau pe Free).
 ALTER TABLE stores ADD COLUMN IF NOT EXISTS comp boolean NOT NULL DEFAULT false;
+
+-- AUTOMATION SCHEDULE (2026-08-18): programarea per-magazin a automatizărilor (mod on_order|cron|on_delivered|off
+-- + minute) + acțiuni de risc, aleasă de merchant peste default-uri (services.automation_config). NULL = default-uri.
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS automation_schedule jsonb;

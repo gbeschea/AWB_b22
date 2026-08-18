@@ -1,42 +1,46 @@
 """
-order_shadow.py — rulează detectoarele de paritate PER COMANDĂ, LA INGEST (webhook), în locul
-sweep-ului de 15 min: DUPLICATE + NR. COLETE + SURPRIZĂ. (Validarea de adresă rulează deja în
-services.webhook_service la fiecare ingest.)
+order_shadow.py — rulează detectoarele de paritate PER COMANDĂ, LA INGEST (webhook), conform
+PROGRAMĂRII alese de merchant (services.automation_config): pentru fiecare detector cu mod `on_order`
+îl rulează la comandă (cu delay opțional). Detectoare: DUPLICATE + NR. COLETE + SURPRIZĂ + BLOCKLIST
++ RISC comandă. (Validarea de adresă rulează deja în webhook_service.)
 
-Log-only + efecte OH-interne SIGURE (memoizează `order.parcel_count` pt AWB, CSQueueItem la duplicate
-„held") — NU atinge Shopify, NU creează AWB. Chemat din services.webhook_service DUPĂ ce comanda e
-comisă, într-o SESIUNE PROPRIE (izolat de webhook → o eroare aici nu poate rupe ingestul). Fiecare
-detector e fail-safe: pe eroare face rollback (ca să nu otrăvească sesiunea) și trece mai departe.
+DUPLICATE și RISC se evaluează la nivel de ORGANIZAȚIE (client care comandă în mai multe magazine ale
+grupului). Log-only + efecte OH-interne SIGURE (memoizează order.parcel_count, CSQueueItem) — NU atinge
+Shopify/AWB. Chemat fire-and-forget din webhook DUPĂ commit, în SESIUNE PROPRIE. Fail-safe: fiecare
+detector, pe eroare, face rollback (ca să nu otrăvească sesiunea) și continuă.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
 import models
 from database import AsyncSessionLocal
+from services import automation_config, org_service
 from services.settings import resolver
 from services.utils import no_cs
 
-from . import duplicates, parcels, surprise
+from . import blocklist, duplicates, parcels, surprise
 
 logger = logging.getLogger("cron_parity")
 
 
-async def _surprise(db, store, order) -> None:
-    # surpriza-parfum: doar brandurile de parfum (garda din surprise)
+# ── detectoare per-comandă (întorc True dacă au scris ceva OH-intern) ──────────────────────────
+
+async def _surprise(db, store, order) -> bool:
     if store.domain not in surprise._SURPRISE_SHOPS:
-        return
+        return False
     n = surprise.analyze(order)
     if n > 0:
         logger.info("ORDER-surprise store=%s order=%s -> +%d parfum-surpriza", store.id, order.name, n)
+    return False
 
 
 async def _parcels(db, store, order) -> bool:
-    """Memoizează order.parcel_count când coletele ≥2 (default-ul 1 ar fi greșit la AWB). Întoarce True dacă a scris."""
     box_map = await parcels._box_map(db)
     if not box_map:
         return False
@@ -48,9 +52,8 @@ async def _parcels(db, store, order) -> bool:
     return False
 
 
-async def _dup(db, store, order) -> bool:
-    """Duplicate pt ACEASTĂ comandă: prefiltru SQL îngust pe telefon/email (rafinat cu _identity în Python),
-    nu scanăm toată fereastra. CSQueueItem pe „held". Întoarce True dacă a adăugat ceva."""
+async def _duplicates(db, store, order) -> bool:
+    """ORG-level: același client (telefon/email bidx) + aceleași SKU-uri, în orice magazin al grupului."""
     cfg = await resolver.resolve_capability(db, store, "duplicates")
     if not cfg.get("enabled"):
         return False
@@ -59,18 +62,19 @@ async def _dup(db, store, order) -> bool:
     ident, skus = duplicates._identity(order, match), duplicates._skuset(order)
     if not ident or not skus:
         return False
+    org_ids = await org_service.org_store_ids(db, store)
     conds = []
-    if order.shipping_phone:
-        conds.append(models.Order.shipping_phone == order.shipping_phone)
-    if order.shipping_email:
-        conds.append(models.Order.shipping_email == order.shipping_email)
+    if order.shipping_phone_bidx:
+        conds.append(models.Order.shipping_phone_bidx == order.shipping_phone_bidx)
+    if order.shipping_email_bidx:
+        conds.append(models.Order.shipping_email_bidx == order.shipping_email_bidx)
     if not conds:
         return False
     floor = datetime.now(timezone.utc) - timedelta(hours=hours)
     rows = (await db.execute(
         select(models.Order)
         .options(selectinload(models.Order.line_items), selectinload(models.Order.shipments))
-        .where(models.Order.store_id == store.id, models.Order.created_at >= floor,
+        .where(models.Order.store_id.in_(org_ids), models.Order.created_at >= floor,
                models.Order.cancelled_at.is_(None), or_(*conds))
     )).scalars().all()
     grp = [o for o in rows if duplicates._identity(o, match) == ident and duplicates._skuset(o) == skus]
@@ -78,44 +82,118 @@ async def _dup(db, store, order) -> bool:
         return False
     added = False
     for o, decision, why in duplicates.resolve_group(grp):
-        logger.info("ORDER-dup store=%s order=%s -> %s (%s)", store.id, o.name, decision, why)
+        logger.info("ORDER-dup store=%s order=%s -> %s (%s)", o.store_id, o.name, decision, why)
         if decision == "held" and not no_cs(store):
             exists = (await db.execute(
                 select(models.CSQueueItem.id).where(models.CSQueueItem.order_id == o.id))).first()
             if not exists:
-                db.add(models.CSQueueItem(store_id=store.id, order_id=o.id, reason="duplicate",
+                db.add(models.CSQueueItem(store_id=o.store_id, order_id=o.id, reason="duplicate",
                                           status="open", reason_detail=why, created_by="auto"))
                 added = True
     return added
 
 
+async def _blocklist(db, store, order) -> bool:
+    if no_cs(store):
+        return False
+    cfg = await resolver.resolve_capability(db, store, "blocklist")
+    if not cfg.get("enabled"):
+        return False
+    ph, em = order.shipping_phone_bidx, order.shipping_email_bidx
+    manual = await blocklist._manual_blocked(db, store)
+    why = None
+    if (ph and ("phone", ph) in manual) or (em and ("email", em) in manual):
+        why = "blocklist manual"
+    elif ph:
+        threshold = int(cfg.get("serial_refuser_threshold") or blocklist._SERIAL_REFUSER_DEFAULT)
+        serial = await blocklist._serial_refusers(db, store, {ph}, threshold, bool(cfg.get("include_failed")))
+        if ph in serial:
+            why = "serial-refuser (>=%d refuzuri)" % threshold
+    if not why:
+        return False
+    logger.info("ORDER-block store=%s order=%s -> would-block (%s)", store.id, order.name, why)
+    exists = (await db.execute(
+        select(models.CSQueueItem.id).where(models.CSQueueItem.order_id == order.id))).first()
+    if not exists:
+        db.add(models.CSQueueItem(store_id=store.id, order_id=order.id, reason="rule",
+                                  status="open", reason_detail="Blocklist: " + why, created_by="auto"))
+        return True
+    return False
+
+
+async def _risk(db, store, order) -> bool:
+    """Scor de risc pe PROFILUL clientului (istoricul de refuzuri COD la nivel de ORGANIZAȚIE) → nivel →
+    acțiunea ALEASĂ de merchant (risk_actions). Shadow: doar loghează would-hold / would-cancel."""
+    ph = order.shipping_phone_bidx
+    if not ph:
+        return False
+    org_ids = await org_service.org_store_ids(db, store)
+    refused = None
+    for k in blocklist._REFUSED:
+        c = models.Shipment.last_status.ilike("%" + k + "%")
+        refused = c if refused is None else (refused | c)
+    n = (await db.execute(
+        select(func.count(func.distinct(models.Order.id)))
+        .join(models.Shipment, models.Shipment.order_id == models.Order.id)
+        .where(models.Order.store_id.in_(org_ids), models.Order.shipping_phone_bidx == ph, refused)
+    )).scalar() or 0
+    level = "high" if n >= 4 else ("medium" if n >= 2 else "low")
+    if level == "low":
+        return False
+    action = automation_config.risk_actions(store).get(level, "none")
+    if action == "none":
+        return False
+    logger.info("ORDER-risk store=%s order=%s -> would-%s (risc=%s, %d refuzuri in grup)",
+                store.id, order.name, action, level, n)
+    return False   # shadow: doar log; hold/cancel real la go-live
+
+
+_HANDLERS = {
+    "duplicates": _duplicates,
+    "parcels":    _parcels,
+    "surprise":   _surprise,
+    "blocklist":  _blocklist,
+    "risk":       _risk,
+}
+
+
 async def run_for_order(store_id: int, order_id: int) -> None:
-    """Punctul de intrare chemat (fire-and-forget) din webhook DUPĂ commit. Sesiune proprie, izolată."""
+    """Fire-and-forget din webhook DUPĂ commit. Rulează detectoarele cu mod `on_order` (cu delay), izolat."""
     try:
+        # 1) programarea: care detectoare on_order + delay (sesiune scurtă, ca să nu ținem sesiune peste sleep)
         async with AsyncSessionLocal() as db:
             store = await db.get(models.Store, store_id)
             if not store:
                 return
+            on_order = [k for k in automation_config.ON_ORDER_DETECTORS
+                        if automation_config.mode_of(store, k) == "on_order"]
+            if not on_order:
+                return
+            delay = max((automation_config.minutes_of(store, k) for k in on_order), default=0)
+        if delay > 0:
+            await asyncio.sleep(min(delay, 120) * 60)     # cap 2h ca să nu ținem task infinit
+        # 2) rulează, în sesiune proprie
+        async with AsyncSessionLocal() as db:
+            store = await db.get(models.Store, store_id)
             order = (await db.execute(
                 select(models.Order)
                 .options(selectinload(models.Order.line_items), selectinload(models.Order.shipments))
                 .where(models.Order.id == order_id)
             )).scalar_one_or_none()
-            if not order:
+            if not store or not order or order.cancelled_at:
                 return
-            # fiecare detector izolat: pe eroare rollback (ca să nu otrăvească sesiunea) + continuă
-            for name, fn, writes in (("surprise", _surprise, False),
-                                     ("parcels", _parcels, True),
-                                     ("dup", _dup, True)):
+            for key in on_order:
+                fn = _HANDLERS.get(key)
+                if not fn:
+                    continue
                 try:
-                    changed = await fn(db, store, order)
-                    if writes and changed:
+                    if await fn(db, store, order):
                         await db.commit()
                 except Exception as e:
                     try:
                         await db.rollback()
                     except Exception:
                         pass
-                    logger.warning("ORDER-%s err store=%s order=%s: %s", name, store_id, order_id, e)
+                    logger.warning("ORDER-%s err store=%s order=%s: %s", key, store_id, order_id, e)
     except Exception:
         logger.exception("order-shadow crashed store=%s order=%s", store_id, order_id)

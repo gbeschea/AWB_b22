@@ -139,6 +139,35 @@ async def put_invoice_settings(
     return {"success": True, "invoice_settings": store.invoice_settings}
 
 
+@router.get("/automation-schedule")
+async def get_automation_schedule(store: models.Store = Depends(require_shop)):
+    """Programarea EFECTIVĂ a automatizărilor (defaults + override magazin) — pt UI."""
+    from services import automation_config
+    return automation_config.merged_schedule(store)
+
+
+@router.put("/automation-schedule")
+async def put_automation_schedule(
+    payload: Dict[str, Any] = Body(default={}),
+    store: models.Store = Depends(require_shop),
+    db: AsyncSession = Depends(get_db),
+):
+    """Salvează programarea aleasă de merchant (mod on_order|cron|on_delivered|off + minute; acțiuni risc).
+    Doar chei/valori valide (automation_config.sanitize)."""
+    from services import automation_config
+    clean = automation_config.sanitize(payload)
+    store.automation_schedule = {**(getattr(store, "automation_schedule", None) or {}), **clean}
+    # AWB: ține delay-ul sincronizat cu auto_awb_service (care citește store.auto_awb_delay_minutes).
+    awb = (store.automation_schedule or {}).get("awb") or {}
+    if "minutes" in awb:
+        try:
+            store.auto_awb_delay_minutes = max(0, int(awb["minutes"]))
+        except Exception:
+            pass
+    await db.commit()
+    return {"success": True, "automation_schedule": automation_config.merged_schedule(store)}
+
+
 @router.post("/orders/{order_id}/invoice")
 async def create_invoice(
     order_id: int,

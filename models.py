@@ -121,6 +121,9 @@ class Store(Base):
   # Buffer before an order is auto-dispatched: only make the AWB once the order is at least this
   # many minutes old (a cancellation / address-fix / COD-confirmation window). NULL/0 = immediate.
   auto_awb_delay_minutes = Column(Integer, nullable=True)
+  # Per-store automation SCHEDULE (services.automation_config): {automation: {mode, minutes}, risk_actions}.
+  # Merchant-chosen mode (on_order | cron | on_delivered | off) + minutes, over code defaults. NULL = defaults.
+  automation_schedule = Column(JSONB, nullable=True)
   # ── Test mode ─────────────────────────────────────────────────────────────────────────────
   # A sandbox the merchant (or an App Store reviewer) turns on to exercise every feature with fake
   # couriers/invoices/orders before any real credentials exist. Everything seeded is marked
