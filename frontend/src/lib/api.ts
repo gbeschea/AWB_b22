@@ -1132,8 +1132,7 @@ export function saveInvoiceSettings(s: Partial<InvoiceSettings>) {
 export interface ScheduleEntry { mode: string; minutes: number; }
 export interface AutomationSchedule {
   duplicates: ScheduleEntry; parcels: ScheduleEntry; surprise: ScheduleEntry;
-  blocklist: ScheduleEntry; risk: ScheduleEntry; cod_capture: ScheduleEntry; awb: ScheduleEntry;
-  risk_actions: { medium: string; high: string };
+  blocklist: ScheduleEntry; cod_capture: ScheduleEntry; awb: ScheduleEntry;
   no_hold?: boolean;
 }
 export function getAutomationSchedule() {

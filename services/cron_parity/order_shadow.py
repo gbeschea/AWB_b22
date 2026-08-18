@@ -15,7 +15,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 import models
@@ -129,40 +129,11 @@ async def _blocklist(db, store, order) -> bool:
     return False
 
 
-async def _risk(db, store, order) -> bool:
-    """Scor de risc pe PROFILUL clientului (istoricul de refuzuri COD la nivel de ORGANIZAȚIE) → nivel →
-    acțiunea ALEASĂ de merchant (risk_actions). Shadow: doar loghează would-hold / would-cancel."""
-    ph = order.shipping_phone_bidx
-    if not ph:
-        return False
-    org_ids = await org_service.org_store_ids(db, store)
-    refused = None
-    for k in blocklist._REFUSED:
-        c = models.Shipment.last_status.ilike("%" + k + "%")
-        refused = c if refused is None else (refused | c)
-    n = (await db.execute(
-        select(func.count(func.distinct(models.Order.id)))
-        .join(models.Shipment, models.Shipment.order_id == models.Order.id)
-        .where(models.Order.store_id.in_(org_ids), models.Order.shipping_phone_bidx == ph, refused)
-    )).scalar() or 0
-    level = "high" if n >= 4 else ("medium" if n >= 2 else "low")
-    if level == "low":
-        return False
-    action = automation_config.risk_actions(store).get(level, "none")
-    if action == "none":
-        return False
-    action = automation_config.effective_action(store, action)   # international: hold -> ship (trimitem tot)
-    logger.info("ORDER-risk store=%s order=%s -> would-%s (risc=%s, %d refuzuri in grup)",
-                store.id, order.name, action.upper(), level, n)
-    return False   # shadow: doar log; ship/hold/cancel real la go-live
-
-
 _HANDLERS = {
     "duplicates": _duplicates,
     "parcels":    _parcels,
     "surprise":   _surprise,
     "blocklist":  _blocklist,
-    "risk":       _risk,
 }
 
 

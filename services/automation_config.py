@@ -20,16 +20,14 @@ DEFAULT_SCHEDULE: Dict[str, Dict[str, Any]] = {
     "parcels":     {"mode": "on_order",     "minutes": 0},
     "surprise":    {"mode": "on_order",     "minutes": 0},
     "blocklist":   {"mode": "on_order",     "minutes": 0},
-    "risk":        {"mode": "on_order",     "minutes": 0},
     "cod_capture": {"mode": "on_delivered", "minutes": 0},
     "awb":         {"mode": "on_order",     "minutes": 5},
 }
-# ce se întâmplă la fiecare nivel de risc de comandă — ales de merchant (mediu/mare)
-RISK_ACTION_DEFAULTS = {"medium": "hold", "high": "cancel"}
 
 AUTOMATIONS = list(DEFAULT_SCHEDULE.keys())
-# detectoare care rulează per-comandă la ingest (order_shadow) când modul e on_order
-ON_ORDER_DETECTORS = ["duplicates", "parcels", "surprise", "blocklist", "risk"]
+# detectoare care rulează per-comandă la ingest (order_shadow) când modul e on_order.
+# „Risc de comandă" = contopit în BLOCKLIST (serial-refuser): ≥N refuzuri în grup → cancel pe intl / hold-CS pe RO.
+ON_ORDER_DETECTORS = ["duplicates", "parcels", "surprise", "blocklist"]
 VALID_MODES = {"on_order", "cron", "on_delivered", "off"}
 VALID_ACTIONS = {"none", "hold", "cancel"}
 
@@ -76,15 +74,6 @@ def effective_action(store, action: str) -> str:
     return action
 
 
-def risk_actions(store) -> Dict[str, str]:
-    ra = _sched(store).get("risk_actions") or {}
-    out = {}
-    for lvl in ("medium", "high"):
-        a = ra.get(lvl)
-        out[lvl] = a if a in VALID_ACTIONS else RISK_ACTION_DEFAULTS[lvl]
-    return out
-
-
 def merged_schedule(store) -> Dict[str, Any]:
     """Programarea EFECTIVĂ (defaults + override magazin) — pentru API/UI."""
     out: Dict[str, Any] = {k: dict(v) for k, v in DEFAULT_SCHEDULE.items()}
@@ -97,7 +86,6 @@ def merged_schedule(store) -> Dict[str, Any]:
                     out[k]["minutes"] = max(0, int(v["minutes"]))
                 except Exception:
                     pass
-    out["risk_actions"] = risk_actions(store)
     out["no_hold"] = close_instead_of_hold(store)
     return out
 
@@ -119,11 +107,6 @@ def sanitize(payload: Dict[str, Any]) -> Dict[str, Any]:
                 pass
         if entry:
             clean[k] = entry
-    ra = payload.get("risk_actions")
-    if isinstance(ra, dict):
-        rc = {lvl: ra[lvl] for lvl in ("medium", "high") if ra.get(lvl) in VALID_ACTIONS}
-        if rc:
-            clean["risk_actions"] = rc
     if isinstance(payload.get("no_hold"), bool):
         clean["no_hold"] = payload["no_hold"]
     return clean
