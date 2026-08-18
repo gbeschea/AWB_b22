@@ -12,10 +12,12 @@ DATABASE_URL = settings.DATABASE_URL
 engine = create_async_engine(
     DATABASE_URL,
     pool_pre_ping=True,
-    # Modest pool — Order Hub shares the fleet box's Postgres with ~22 other apps and
-    # connects direct to :5432 (SQLAlchemy pools; avoids asyncpg-vs-PgBouncer issues).
-    pool_size=5,
-    max_overflow=10,
+    # Pool sized for webhook BURSTS — evening storms hit ~270 webhooks/min and each in-flight
+    # request holds a session; 5+10 exhausted twice on 18-aug (whole app 500'd, incl. the UI).
+    # 10+20 = max 30 conns; the box's Postgres has max_connections=200 (~143 used across ~22 apps),
+    # so this stays a fair share. Connects direct to :5432 (SQLAlchemy pools; no PgBouncer).
+    pool_size=10,
+    max_overflow=20,
     pool_recycle=1800,
     echo=False,
 )

@@ -1,0 +1,6 @@
+/* Fix input hairline: Polaris 13 deseneaza bordura TextField la 0.66px (--p-border-width-0165).
+   Pe ecrane non-retina / zoom fractionar, subpixelul DISPARE la unele campuri (raportat de owner:
+   "bara de sus de la input-uri nu apare; unele se vad bine, la unele e problema"). 1px intreg = vizibil mereu. */
+.Polaris-TextField__Backdrop {
+  border-width: 1px;
+}

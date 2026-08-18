@@ -214,6 +214,13 @@ async def on_startup():
         app.state.cron_parity_task = asyncio.create_task(cron_parity_loop.run_forever())
         logger.info("cron-parity SHADOW loop scheduled.")
 
+    # Punte xConnector → OH pt statusul PRINTED (etichete printate la depozit = `downloaded` pe
+    # documentul SHIPPING_LABEL). Se auto-reduce la tăcere pt magazine fără cont xConnector.
+    if os.environ.get("PRINTED_BRIDGE_ENABLED", "1").strip() != "0":
+        from services import awbprint_bridge
+        app.state.printed_bridge_task = asyncio.create_task(awbprint_bridge.run_forever())
+        logger.info("printed-bridge (xConnector downloaded) scheduled.")
+
 
 @app.on_event("shutdown")
 async def on_shutdown():

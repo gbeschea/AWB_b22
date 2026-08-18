@@ -189,19 +189,9 @@ async def upsert_order_from_webhook(
     # PK + children flushed together.
     await db.flush()
 
-    if line_items:
-        # Enrich the Shopify product tags for any SKU we don't already have them for (best-effort;
-        # a failure just leaves them NULL for the backfill endpoint to pick up later).
-        need = [li.sku for li in order.line_items if li.sku and not li.product_tags]
-        if need:
-            try:
-                from services import shopify_service
-                tag_map = await shopify_service.get_variant_product_tags(store, need)
-                for li in order.line_items:
-                    if li.sku and not li.product_tags:
-                        li.product_tags = tag_map.get(li.sku.strip().lower())
-            except Exception as e:
-                logger.info("product-tags enrich failed for %s: %s", order.name, e)
+    # Product-tags enrich moved POST-COMMIT (see below): it calls the Shopify API, and doing that
+    # while holding this session was the biggest pool-hold under webhook storms (18-aug incident #2).
+    needs_tag_enrich = bool(line_items) and any(li.sku and not li.product_tags for li in order.line_items)
 
     # Fulfillment tracking → Shipment (so it enters the print queue / AWB tracking).
     for f in payload.get("fulfillments") or []:
@@ -255,6 +245,17 @@ async def upsert_order_from_webhook(
     except Exception:
         logger.exception("could not schedule per-order shadow for %s", order.name)
 
+    # Product-tags enrich — POST-COMMIT, sesiune proprie, gardat de semaforul shadow: apelul Shopify
+    # (extern, lent) nu mai ține sesiunea webhook-ului deschisă. Best-effort ca înainte.
+    if needs_tag_enrich:
+        try:
+            import asyncio
+            _te = asyncio.create_task(_enrich_product_tags(store.id, order.id))
+            _ORDER_SHADOW_TASKS.add(_te)
+            _te.add_done_callback(_ORDER_SHADOW_TASKS.discard)
+        except Exception:
+            logger.info("could not schedule tag enrich for %s", order.name)
+
     logger.info(
         "Webhook %s order %s for shop=%s.",
         "created" if is_new else "updated", order.name, store.domain,
@@ -287,6 +288,38 @@ async def handle_order_edited(
     await sync_service._process_and_insert_orders_in_batches(db, [node], store.id, store.pii_source)
     logger.info("orders/edited re-synced order %s for shop=%s.", order_id, store.domain)
     return None
+
+
+async def _enrich_product_tags(store_id: int, order_id: int) -> None:
+    """Umple LineItem.product_tags din Shopify — POST-COMMIT, sesiune proprie, sub semaforul shadow
+    (apel extern lent; nu ținem nici pool-ul, nici webhook-ul). Eșecul lasă NULL pt backfill."""
+    from services.cron_parity.order_shadow import _SEM
+    from sqlalchemy.orm import selectinload as _sel
+    try:
+        async with _SEM, AsyncSessionLocal() as db:
+            store = await db.get(models.Store, store_id)
+            order = (await db.execute(
+                select(models.Order).options(_sel(models.Order.line_items))
+                .where(models.Order.id == order_id)
+            )).scalar_one_or_none()
+            if not store or not order:
+                return
+            need = [li.sku for li in order.line_items if li.sku and not li.product_tags]
+            if not need:
+                return
+            from services import shopify_service
+            tag_map = await shopify_service.get_variant_product_tags(store, need)
+            changed = False
+            for li in order.line_items:
+                if li.sku and not li.product_tags:
+                    tags = tag_map.get(li.sku.strip().lower())
+                    if tags:
+                        li.product_tags = tags
+                        changed = True
+            if changed:
+                await db.commit()
+    except Exception as e:
+        logger.info("product-tags enrich (post-commit) failed for order_id=%s: %s", order_id, e)
 
 
 # --- dispatch (referenced by routes/webhooks.py) ---------------------------

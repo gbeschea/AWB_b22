@@ -8,16 +8,17 @@ import {
   ApiError, checkAddress, getValidationPolicies, getValidationRules, putValidationPolicies,
   type AddressCheckResult, type PolicyMeta, type ValidationRule,
 } from "../lib/api";
+import { t } from "../lib/i18n";
 
 /* The Address Lab is the window into the consolidated validator: try any address against the
    live engine (RO rich nomenclator + homonym guard; CZ/PL/BG/HU/SK intl nomenclators), inspect
    the always-on correctness rules, and tune the eligible business policies. */
 
 const COUNTRIES = [
-  { label: "România", value: "RO" }, { label: "Cehia (CZ)", value: "CZ" },
-  { label: "Polonia (PL)", value: "PL" }, { label: "Bulgaria (BG)", value: "BG" },
-  { label: "Ungaria (HU)", value: "HU" }, { label: "Slovacia (SK)", value: "SK" },
-  { label: "Altă țară (→ geocoder)", value: "XX" },
+  { label: "România", value: "RO" }, { label: t("Czechia (CZ)"), value: "CZ" },
+  { label: t("Poland (PL)"), value: "PL" }, { label: "Bulgaria (BG)", value: "BG" },
+  { label: t("Hungary (HU)"), value: "HU" }, { label: t("Slovakia (SK)"), value: "SK" },
+  { label: t("Other country (→ geocoder)"), value: "XX" },
 ];
 
 function verdictTone(status: string): "success" | "info" | "warning" | "critical" {
@@ -29,10 +30,10 @@ function verdictTone(status: string): "success" | "info" | "warning" | "critical
   }
 }
 const VERDICT_LABEL: Record<string, string> = {
-  valid: "VALID — pleacă așa cum e",
-  corrected: "CORECTAT — write-back propus",
-  needs_geocoder: "GEOCODER — nomenclatorul nu decide, merge la HERE",
-  cs: "CS — are nevoie de om",
+  valid: t("VALID — ships as-is"),
+  corrected: t("CORRECTED — write-back proposed"),
+  needs_geocoder: t("GEOCODER — the nomenclator cannot decide, goes to HERE"),
+  cs: t("CS — needs a human"),
 };
 
 function toast(msg: string) {
@@ -53,7 +54,7 @@ export default function AddressLab() {
   const runCheck = async () => {
     setBusy(true); setCheckErr(null); setResult(null);
     try { setResult(await checkAddress(form)); }
-    catch (e) { setCheckErr(e instanceof ApiError ? e.message : "Verificarea a eșuat."); }
+    catch (e) { setCheckErr(e instanceof ApiError ? e.message : t("The check failed.")); }
     finally { setBusy(false); }
   };
 
@@ -73,7 +74,7 @@ export default function AddressLab() {
       const [r, p] = await Promise.all([getValidationRules(), getValidationPolicies()]);
       setRules(r.rules); setMeta(r.policy_meta); setDefaults(p.defaults); setEffective(p.effective);
       setDirty({});
-    } catch (e) { setLoadErr(e instanceof ApiError ? e.message : "Nu am putut încărca regulile."); }
+    } catch (e) { setLoadErr(e instanceof ApiError ? e.message : t("Could not load the rules.")); }
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void load(); }, [load]);
@@ -89,7 +90,7 @@ export default function AddressLab() {
       const r = await putValidationPolicies(current);
       setEffective(r.effective); setDirty({});
       toast("Politici salvate");
-    } catch (e) { toast(e instanceof ApiError ? e.message : "Salvarea a eșuat"); }
+    } catch (e) { toast(e instanceof ApiError ? e.message : t("Saving failed")); }
     finally { setSaveBusy(false); }
   };
 
@@ -100,40 +101,40 @@ export default function AddressLab() {
     <Page
       fullWidth
       title="Address lab"
-      subtitle="Validatorul consolidat: verifică o adresă, vezi regulile, ajustează politicile."
-      primaryAction={isDirty ? { content: "Salvează politicile", onAction: () => void save(), loading: saveBusy } : undefined}
-      secondaryActions={[{ content: "Corecții (CS backlog)", onAction: () => navigate("/app/cs-queue") }]}
+      subtitle={t("The consolidated validator: check an address, see the rules, tune the policies.")}
+      primaryAction={isDirty ? { content: t("Save policies"), onAction: () => void save(), loading: saveBusy } : undefined}
+      secondaryActions={[{ content: t("Corrections (CS backlog)"), onAction: () => navigate("/app/cs-queue") }]}
     >
       <BlockStack gap="400">
 
         {/* ---- Verifică o adresă ---- */}
         <Card>
           <BlockStack gap="300">
-            <Text as="h2" variant="headingMd">Verifică o adresă</Text>
+            <Text as="h2" variant="headingMd">{t("Check an address")}</Text>
             <InlineStack gap="200" wrap>
               <div style={{ minWidth: 180 }}>
-                <Select label="Țara" options={COUNTRIES} value={form.country} onChange={set("country")} />
+                <Select label={t("Country")} options={COUNTRIES} value={form.country} onChange={set("country")} />
               </div>
               <div style={{ minWidth: 160, flex: "1 1 160px" }}>
-                <TextField label="Județ / regiune" value={form.province} onChange={set("province")} autoComplete="off" />
+                <TextField label={t("County / region")} value={form.province} onChange={set("province")} autoComplete="off" />
               </div>
               <div style={{ minWidth: 180, flex: "1 1 180px" }}>
-                <TextField label="Localitate" value={form.city} onChange={set("city")} autoComplete="off" />
+                <TextField label={t("Locality")} value={form.city} onChange={set("city")} autoComplete="off" />
               </div>
               <div style={{ minWidth: 120 }}>
-                <TextField label="Cod poștal" value={form.zip} onChange={set("zip")} autoComplete="off" />
+                <TextField label={t("Postal code")} value={form.zip} onChange={set("zip")} autoComplete="off" />
               </div>
             </InlineStack>
             <InlineStack gap="200" wrap>
               <div style={{ flex: "2 1 300px" }}>
-                <TextField label="Adresa 1 (stradă + număr)" value={form.address1} onChange={set("address1")} autoComplete="off" />
+                <TextField label={t("Address 1 (street + number)")} value={form.address1} onChange={set("address1")} autoComplete="off" />
               </div>
               <div style={{ flex: "1 1 180px" }}>
-                <TextField label="Adresa 2" value={form.address2} onChange={set("address2")} autoComplete="off" />
+                <TextField label={t("Address 2")} value={form.address2} onChange={set("address2")} autoComplete="off" />
               </div>
               <div style={{ alignSelf: "end" }}>
                 <Button variant="primary" loading={busy} onClick={() => void runCheck()}
-                  disabled={!form.city && !form.zip && !form.address1}>Verifică</Button>
+                  disabled={!form.city && !form.zip && !form.address1}>{t("Check")}</Button>
               </div>
             </InlineStack>
 
@@ -149,14 +150,14 @@ export default function AddressLab() {
                         .filter(Boolean).join(", ")}
                     </Text>
                   )}
-                  <Text as="p" variant="bodySm" tone="subdued">sursă: {result.source}</Text>
+                  <Text as="p" variant="bodySm" tone="subdued">{t("source")}: {result.source}</Text>
                 </BlockStack>
               </Banner>
             )}
           </BlockStack>
         </Card>
 
-        {loadErr && <Banner tone="critical" title="Nu am putut încărca regulile" onDismiss={() => setLoadErr(null)}><p>{loadErr}</p></Banner>}
+        {loadErr && <Banner tone="critical" title={t("Could not load the rules")} onDismiss={() => setLoadErr(null)}><p>{loadErr}</p></Banner>}
 
         {loading ? (
           <Card><SkeletonBodyText lines={8} /></Card>
@@ -216,7 +217,7 @@ export default function AddressLab() {
                 </InlineStack>
                 <Divider />
                 <InlineStack gap="400" wrap align="start">
-                  {[["România", roRules], ["Internațional (CZ/PL/BG/HU/SK)", intlRules]].map(([title, list]) => (
+                  {[["România", roRules], [t("International (CZ/PL/BG/HU/SK)"), intlRules]].map(([title, list]) => (
                     <div key={title as string} style={{ flex: "1 1 420px", minWidth: 320 }}>
                       <BlockStack gap="200">
                         <Text as="h3" variant="headingSm">{title as string}</Text>
