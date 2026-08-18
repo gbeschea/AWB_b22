@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from crud import stores as crud_stores
 from database import get_db
-from services import shopify_service
+from services import shopify_service, shopify_billing
 from settings import settings
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -103,8 +103,16 @@ async def callback(request: Request, db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "Missing shop/code")
     if not _verify_hmac(q):
         raise HTTPException(401, "HMAC verification failed")
-    if not state or state != request.cookies.get("oauth_state"):
+    if not state:
         raise HTTPException(401, "State mismatch")
+    # The signed state itself is the trust anchor (HMAC via URLSafeTimedSerializer,
+    # time-limited, shop bound + verified below). The oauth_state cookie does NOT
+    # survive a real embedded install — the flow can start inside the admin iframe
+    # where Set-Cookie is third-party (blocked), and the admin frequently fires the
+    # install twice so a second /auth/install overwrites the first cookie. Requiring
+    # cookie equality therefore 401'd fresh installs with "State mismatch" (App
+    # Store review, 2026-07-23). Signature + max_age + shop-match + Shopify's own
+    # callback HMAC replace the cookie comparison.
     try:
         data = _signer().loads(state, max_age=_STATE_MAX_AGE)
     except (BadSignature, SignatureExpired):
@@ -112,20 +120,32 @@ async def callback(request: Request, db: AsyncSession = Depends(get_db)):
     if data.get("shop") != shop:
         raise HTTPException(401, "State shop mismatch")
 
-    # Exchange the temporary code for a permanent offline access token.
+    # Exchange the temporary code for an EXPIRING offline access token. `expiring=1` is required:
+    # without it Shopify issues a non-expiring token, which public apps may no longer use and which
+    # the Admin API rejects with a 403 that reads like a broken token rather than a missing flag.
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(
             f"https://{shop}/admin/oauth/access_token",
-            json={
+            data={
                 "client_id": settings.SHOPIFY_API_KEY,
                 "client_secret": settings.SHOPIFY_API_SECRET,
                 "code": code,
+                "expiring": "1",
             },
+            headers={"Accept": "application/json"},
         )
     r.raise_for_status()
-    access_token = (r.json() or {}).get("access_token")
+    body = r.json() or {}
+    access_token = body.get("access_token")
     if not access_token:
         raise HTTPException(502, "No access_token returned by Shopify")
+    _now = datetime.now(timezone.utc)
+    _expires_at = _now + timedelta(seconds=int(body["expires_in"])) if body.get("expires_in") else None
+    _refresh_token = body.get("refresh_token")
+    _refresh_expires_at = (
+        _now + timedelta(seconds=int(body["refresh_token_expires_in"]))
+        if body.get("refresh_token_expires_in") else None
+    )
 
     # For OAuth apps the webhook HMAC secret is the single app secret.
     store = await crud_stores.create_or_update_store(
@@ -135,7 +155,18 @@ async def callback(request: Request, db: AsyncSession = Depends(get_db)):
         access_token=access_token,
         shared_secret=settings.SHOPIFY_API_SECRET,
         is_active=True,
+        token_expires_at=_expires_at,
+        refresh_token=_refresh_token,
+        refresh_token_expires_at=_refresh_expires_at,
     )
+
+    # COMP: our OWN shops get Pro (unlimited labels) without a Shopify charge — it's our app on our
+    # stores. While OH is private every install is ours, so auto-comp here (OH_COMP_ALL_INSTALLS) means
+    # we never have to hand-flip it — the gap where a store installed after the manual pass stayed on
+    # Free. External installs (post-launch, not in the allowlist) fall through and stay billable.
+    if not getattr(store, "comp", False) and shopify_billing.should_comp_on_install(shop):
+        store.comp = True
+        await db.commit()
 
     # Register operational webhooks (app/uninstalled + orders create/updated/edited).
     # Idempotent + self-healing: if this fails now (e.g. PCD not yet granted), the on-load

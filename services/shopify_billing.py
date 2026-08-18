@@ -113,6 +113,21 @@ def entitled_plan_key(store) -> str:
     return plan if status in _ENTITLING_STATUSES else FREE_PLAN
 
 
+def should_comp_on_install(domain: str) -> bool:
+    """Whether a freshly-installed shop should get a free Pro comp (it's one of OUR shops).
+
+    While OH is private it is installed only on our own stores, so OH_COMP_ALL_INSTALLS=true comps
+    every install with zero upkeep — that's what closes the "only some got comped" gap. At public
+    launch, set that to false and list our own shop domains in OH_COMP_DOMAINS (comma-separated) so
+    an EXTERNAL install (not one of ours) stays billable.
+    """
+    d = (domain or "").strip().lower()
+    if os.environ.get("OH_COMP_ALL_INSTALLS", "").strip().lower() == "true":
+        return True
+    allow = {x.strip().lower() for x in (os.environ.get("OH_COMP_DOMAINS", "") or "").split(",") if x.strip()}
+    return d in allow
+
+
 def label_limit_for(store) -> Optional[int]:
     """The monthly shipping-label cap for this shop's plan (None = unlimited)."""
     plan = PLANS.get(entitled_plan_key(store), PLANS[FREE_PLAN])
