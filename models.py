@@ -102,8 +102,12 @@ class Store(Base):
   # (valid address + resolvable courier + not yet shipped/cancelled), but ONLY inside the window
   # below. NULL window hours = all day. Hours are 0-23 in Europe/Bucharest local time.
   auto_awb_enabled = Column(Boolean, default=False, nullable=False)
-  awb_window_start = Column(Integer, nullable=True)
+  awb_window_start = Column(Integer, nullable=True)   # ALLOWED window, whole hours (0-23), wraps past midnight
   awb_window_end = Column(Integer, nullable=True)
+  # BLACKOUT interval (minute precision, minutes-of-day 0-1439): NO auto-AWB inside [start,end), wraps past
+  # midnight when end<start. Independent of the allowed window — use for a lunch pause, a nightly freeze, etc.
+  awb_blackout_start = Column(Integer, nullable=True)
+  awb_blackout_end = Column(Integer, nullable=True)
   # Which courier account the automation uses. Auto-AWB does NOTHING until this (or a profile) is
   # set — we never guess a courier for an auto-dispatched shipment.
   auto_awb_account_key = Column(String(64), nullable=True)
@@ -167,6 +171,10 @@ class Order(Base):
   mapped_payment = Column(String(64), nullable=True)
   tags = Column(Text, nullable=True)
   note = Column(Text, nullable=True)
+  # Parcel count for AWB creation — source of truth is Order Hub. Synced from the Shopify parcel-count
+  # metafield at ingest ("preia"), editable in OH, remembered here ("memorează"), and written back to the
+  # metafield when set in OH. NULL = fall back to the shipment profile's default_parcels.
+  parcel_count = Column(Integer, nullable=True)
   sync_status = Column(String(32), default='not_synced')
   last_sync_at = Column(TIMESTAMP(timezone=True), nullable=True)
   shopify_status = Column(String(64), nullable=True, index=True)
