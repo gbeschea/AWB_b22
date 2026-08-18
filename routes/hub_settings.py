@@ -36,9 +36,9 @@ async def hub_page(request: Request, db: AsyncSession = Depends(get_db),
         select(models.Store).where(models.Store.is_active.is_(True)).order_by(models.Store.name)
     )).scalars().all()
     orgs = (await db.execute(select(models.Organization).order_by(models.Organization.name))).scalars().all()
-    return templates.TemplateResponse("settings_hub.html", {
-        "request": request, "capabilities": P.CAPABILITIES,
-        "stores": stores, "organizations": orgs,
+    # Starlette nou: TemplateResponse(request, name, context) — request separat (îl injectează în context)
+    return templates.TemplateResponse(request, "settings_hub.html", {
+        "capabilities": P.CAPABILITIES, "stores": stores, "organizations": orgs,
     })
 
 

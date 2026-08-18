@@ -1,7 +1,11 @@
-{% extends "_layout.html" %}
-{% block title %}Automatizări - Order Hub{% endblock %}
-
-{% block head_extra %}
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<title>Automatizări - Order Hub</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- self-contained: NU extinde _layout.html (nav-ul legacy referă rute Jinja șterse → NoMatchFound) -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"/>
 <style>
   .hub-scope { display:flex; gap:1rem; align-items:end; flex-wrap:wrap; margin-bottom:1.5rem; }
   .hub-scope > div { margin:0; }
@@ -31,9 +35,11 @@
            border-radius:.5rem; opacity:0; transition:opacity .2s; }
   #saved.show { opacity:1; }
 </style>
-{% endblock %}
+</head>
+<body>
+<main class="container">
+<nav style="margin-bottom:1rem;"><a href="/app">← Order Hub</a></nav>
 
-{% block content %}
 <h1 style="margin-bottom:.4rem;">⚡ Automatizări</h1>
 <p class="cap-help" style="margin-bottom:1.2rem;">
   Un magazin nou <strong>moștenește tot</strong> din organizație — atingi ceva doar unde chiar diferă.
@@ -57,9 +63,8 @@
 
 <div id="caps"><p aria-busy="true">Se încarcă…</p></div>
 <div id="saved">Salvat ✓</div>
-{% endblock %}
+</main>
 
-{% block scripts %}
 <script>
 const PRESET_LABELS = {
   off:"Oprit", conservator:"Conservator", echilibrat:"Echilibrat (recomandat)", agresiv:"Agresiv",
@@ -96,7 +101,6 @@ function render(data){
 
     const controls = document.createElement('div'); controls.className='cap-controls';
     if(c.column){   // capabilități pe coloane (auto_awb, status_sync, invoicing) — flag autoritativ de la rută
-      // capabilitate pe coloane — se editează per magazin în pagina de magazine
       const note = document.createElement('span'); note.className='adv-note';
       note.innerHTML = scope==='store'
         ? `Detalii (fereastră, notificări, restock…) → <a href="/settings/stores">editorul magazinului</a>.`
@@ -179,4 +183,5 @@ async function saveAdv(capability, key, val){
 scopeSel.addEventListener('change', load);
 load();
 </script>
-{% endblock %}
+</body>
+</html>
