@@ -63,7 +63,7 @@ CFG = {
                fmt=lambda d: d[:2] + "-" + d[2:], pc_complete=False, loc_cnt="cnt"),
     "BG": dict(pclen=4, tbl="bg_streets_osm", city="city", city_norm="city_norm", street_norm="street_norm", pc="postcode",
                loc="bg_localities", loc_city="name", loc_norm="name_norm", loc_pc="postcode", lat="name_lat",
-               fmt=lambda d: d, pc_complete=False, loc_cnt="cnt"),
+               fmt=lambda d: d, pc_complete=False, loc_cnt="cnt", fold_lat=True),
     "HU": dict(pclen=4, tbl="hu_streets", city="city", city_norm="city_norm", street_norm="street_norm", pc="postcode",
                loc="hu_localities", loc_city="name", loc_norm="name_norm", loc_pc="postcode",
                fmt=lambda d: d, pc_complete=True, loc_cnt=None),
@@ -182,7 +182,49 @@ def _locality_pcs(cur, cfg, cand):
     args = (cand, cand, cand, cand) if lat else (cand, cand, cand)
     cur.execute("select max(%s), regexp_replace(%s,'\\D','','g') as pcd, %s from %s where (%s) and %s is not null "
                 "group by pcd order by 3 desc" % (lc, lp, cntcol, lt, where, lp), args)
-    return [(r[0], r[1], int(r[2])) for r in cur.fetchall() if r[1]]
+    rows = [(r[0], r[1], int(r[2])) for r in cur.fetchall() if r[1]]
+    if not rows and cfg.get("fold_lat"):        # BG: ultima plasă pe forma latină pliată/devocalizată (#567)
+        rows = _folded_locality_pcs(cur, cfg, cand)
+    return rows
+
+
+# ── BG: pliază variantele cu care bulgarii scriu LATINIZAT același nume (sursa reală de „negăsit", #567) ──
+_LAT_VAR = [("x", "h"), ("kh", "h"), ("ck", "k"), ("cz", "ch"), ("sch", "sh"), ("j", "y"), ("w", "v"), ("q", "k")]
+_DEVOICE = {"t": "d", "p": "b", "k": "g", "s": "z", "f": "v"}     # consoana finală se devocalizează în bulgară
+
+def _fold_lat(s):
+    """„Xaskovo"→Хасково (X pt Х), „Asenovgrat"→Асеновград (T final în loc de D — așa se aude). Pliem AMBELE
+    părți la aceeași formă și comparăm; o localitate inexistentă tot nu se leagă. (paritate xconnector #567)"""
+    t = _fold(s)
+    for a, b in _LAT_VAR:
+        t = t.replace(a, b)
+    out = []
+    for w in t.split():
+        if len(w) > 3 and w[-1] in _DEVOICE:
+            w = w[:-1] + _DEVOICE[w[-1]]
+        out.append(w)
+    return " ".join(out)
+
+
+_FOLDED_LOC = None
+def _folded_locality_pcs(cur, cfg, cand):
+    """Ultima plasă înainte de «negăsit»: compară forma PLIATĂ a numelui scris de client cu forma pliată a
+    fiecărei localități (name_lat). Cache pe proces (~11k localități, o singură interogare). [(nume, pcd, cnt)]."""
+    global _FOLDED_LOC
+    fc = _fold_lat(cand)
+    if len(fc) < 4:
+        return []
+    if _FOLDED_LOC is None:
+        lt, lc, lat, lp = cfg.get("loc", cfg["tbl"]), cfg.get("loc_city", cfg["city"]), cfg["lat"], cfg.get("loc_pc", cfg["pc"])
+        cur.execute("select %s, %s, regexp_replace(%s,'\\D','','g') from %s where %s is not null and %s<>''"
+                    % (lc, lat, lp, lt, lp, lat))
+        _FOLDED_LOC = [(n, _fold_lat(nl), pc) for n, nl, pc in cur.fetchall() if pc and nl]
+    agg = {}
+    for name, fl, pc in _FOLDED_LOC:
+        if fl == fc:
+            d, c = agg.get(pc, (name, 0))
+            agg[pc] = (d, c + 1)
+    return [(d, pc, c) for pc, (d, c) in agg.items()]
 
 
 def _pick_pc(locs, client_pc):

@@ -43,6 +43,97 @@ def get_courier_mapping(tags: List[str]) -> Optional[str]:
             return settings.COURIER_MAP[normalized_tag]
     return None
 
+def synth_recipient_email(store: "models.Store", order_name: Optional[str]) -> str:
+    """Placeholder recipient email when the buyer gave none: '<handle>-<order#>@<shop-domain>'.
+    Valid format on the shop's own (MX-having) domain so couriers that REQUIRE an email accept
+    it — it is NOT a real inbox, only a courier-validation stand-in."""
+    domain = (getattr(store, "domain", None) or "orderhub.local").strip().lower()
+    handle = (domain.split(".")[0] or "store")
+    num = re.sub(r"\D", "", str(order_name or "")) or "0"
+    return f"{handle}-{num}@{domain}"
+
+
+def recipient_email(raw_email: Optional[str], store: "models.Store", order_name: Optional[str]) -> str:
+    """The email to put on the AWB: the real one if the buyer gave a valid-looking address,
+    otherwise a synthesized placeholder (store handle + order number)."""
+    e = (raw_email or "").strip()
+    return e if ("@" in e and "." in e.split("@")[-1]) else synth_recipient_email(store, order_name)
+
+
+# Cheile din note_attributes/customAttributes sub care stă emailul REAL al clientului (formularul COD),
+# NU în câmpul standard `order.email`. Curierii (xConnector→DPD) citesc doar câmpul → dacă e gol resping
+# `receiver.email.not-empty`, deși clientul și-a scris emailul. Îl ridicăm de aici. (paritate xconnector #568)
+_EMAIL_NOTE_KEYS = {"e-mailem", "email", "e-mail", "mail", "e-mail address", "adresa de email", "e-mail:"}
+
+def email_from_note_attributes(note_attrs: Any) -> Optional[str]:
+    """Emailul REAL ascuns în note_attributes (REST: name/value) sau customAttributes (GraphQL: key/value).
+    Întoarce un email valid-arătând sau None. Folosit ca sursă înainte de placeholder-ul sintetic."""
+    for a in (note_attrs or []):
+        if not isinstance(a, dict):
+            continue
+        key = (a.get("name") or a.get("key") or "").strip().lower()
+        if key in _EMAIL_NOTE_KEYS:
+            v = (a.get("value") or "").strip()
+            if "@" in v and "." in v.split("@")[-1]:
+                return v
+    return None
+
+
+def receiver_name(raw_name: Optional[str], city: Optional[str] = None) -> Optional[str]:
+    """Nume destinatar SIGUR pentru curier. Când clientul scrie TELEFONUL/gunoi în câmpul de nume (nicio
+    literă), DPD respinge `receiver.name.match` și comanda stă blocată → punem un placeholder NEUTRU
+    `Client <Oraș>` (fallback `Client Nou`). Numele în ORICE alfabet (latin/chirilic/grec) au litere și trec
+    NEATINSE — nu inventăm identitatea nimănui. (paritate xconnector #562)"""
+    n = (raw_name or "").strip()
+    if re.search(r"[^\W\d_]", n, re.UNICODE):     # cel puțin o LITERĂ (orice scriere)
+        return n
+    c = re.sub(r"[^\w\s-]", "", (city or "").strip(), flags=re.UNICODE).strip() or "Nou"
+    return "Client %s" % c[:30]
+
+
+# Magazine fără coadă CS lucrată — comenzile blocate NU se trimit la CS (HOLD-ul acolo = comandă moartă,
+# nimeni nu lucrează coada). Cronul auto-rezolvă în loc să țină pe hold. (paritate xconnector NO_CS_DOMAINS)
+# Măsurat pe Bonhaus CZ: 138 comenzi înghețate din 17-iunie (63.484 CZK) → 12 după deblocare.
+NO_CS_SLUGS = {"16w7xv-0w",   # SK
+               "63e901-2f",   # HU
+               "oriceredus",  # Orice Redus
+               "vthuzq-7j",   # Bonhaus CZ
+               "f0yrmh-ia",   # Bonhaus PL
+               "ux1x6n-n2"}   # Bonhaus BG
+
+def no_cs(store: "models.Store") -> bool:
+    """True dacă magazinul e pe lista fără-coadă-CS (nu rutăm comenzi blocate la CS pe piața asta)."""
+    dom = (getattr(store, "domain", None) or "").strip().lower()
+    return dom.split(".")[0] in NO_CS_SLUGS or dom in {s + ".myshopify.com" for s in NO_CS_SLUGS}
+
+
+DEFAULT_CONTENT_TEMPLATE = "${orderName} / ${quantity} x ${sku}"
+
+
+def render_content(template: Optional[str], order: Any) -> str:
+    """Render an AWB content / shipping description from a template with ${orderName},
+    ${quantity}, ${sku} — using the order's FIRST line item (matches the courier default).
+    Merchant-overridable; capped at 100 chars."""
+    tmpl = template or DEFAULT_CONTENT_TEMPLATE
+    items = getattr(order, "line_items", None) or []
+    first = items[0] if items else None
+
+    def _g(obj, *names):
+        for n in names:
+            v = getattr(obj, n, None) if obj is not None else None
+            if v not in (None, ""):
+                return v
+        return None
+
+    qty = _g(first, "quantity", "qty") or 1
+    sku = _g(first, "sku") or _g(first, "title") or "COLET"
+    name = getattr(order, "name", None) or "ORDER"
+    out = (str(tmpl).replace("${orderName}", str(name))
+                    .replace("${quantity}", str(qty))
+                    .replace("${sku}", str(sku)))
+    return re.sub(r"\s+", " ", out).strip()[:100]
+
+
 # --- Funcții de Actualizare a Relațiilor Comenzii ---
 
 def update_line_items(order: models.Order, shopify_line_items: List[Dict]):

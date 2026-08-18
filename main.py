@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import json
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -147,9 +148,23 @@ async def root_entry(request: Request, db=Depends(get_db)):
     if store and store.is_active and store.access_token:
         suffix = f"?shop={quote(shop)}" + (f"&host={quote(host)}" if host else "")
         return RedirectResponse(f"/app{suffix}")
-    # Not installed → start OAuth. Shopify loads this entry TOP-LEVEL during install, so a
-    # plain 302 works. (Do NOT emit an App Bridge <script> here — outside the admin it
-    # hijacks navigation to the admin app URL and pre-empts the OAuth redirect.)
+    # Not installed → start OAuth. If Shopify loaded this entry EMBEDDED (in the admin iframe),
+    # a plain 302 to Shopify OAuth loads the OAuth page INSIDE the iframe → "refused to connect"
+    # (it works only after a manual refresh, which reloads top-level). So when embedded, break OUT
+    # of the iframe via App Bridge — window.open(url,'_top') is intercepted and does the top-level
+    # navigation — and run OAuth at the top. Loaded TOP-LEVEL (the other install path) → plain 302
+    # (emitting App Bridge OUTSIDE the admin would hijack navigation, hence the guard).
+    embedded = request.query_params.get("embedded") == "1" or request.headers.get("sec-fetch-dest") == "iframe"
+    if embedded and settings.SHOPIFY_API_KEY:
+        install_url = f"{(settings.SHOPIFY_APP_URL or '').rstrip('/')}/auth/install?shop={quote(shop)}"
+        html = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            f"<meta name='shopify-api-key' content='{settings.SHOPIFY_API_KEY}'>"
+            "<script src='https://cdn.shopify.com/shopifycloud/app-bridge.js'></script></head>"
+            "<body><script>window.open(" + json.dumps(install_url) + ", '_top');</script></body></html>"
+        )
+        return HTMLResponse(html, headers={
+            "Content-Security-Policy": "frame-ancestors https://*.myshopify.com https://admin.shopify.com;"})
     return RedirectResponse(f"/auth/install?shop={quote(shop)}")
 
 

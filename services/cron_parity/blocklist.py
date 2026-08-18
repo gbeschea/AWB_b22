@@ -19,6 +19,7 @@ from sqlalchemy.orm import selectinload
 
 import models
 from services.settings import resolver
+from services.utils import no_cs
 
 logger = logging.getLogger("cron_parity.blocklist")
 
@@ -64,6 +65,8 @@ async def _serial_refusers(db, store: models.Store, phone_bidxs: Set[str], thres
 async def run_shadow(db, store: models.Store) -> Dict[str, int]:
     """Detectează clienți blocați pe comenzile recente FĂRĂ AWB, LOG-ONLY. HOLD → CSQueueItem reason='rule'.
     Config (enabled/prag/include_failed) = presetul capabilității, moștenit org→magazin (resolver)."""
+    if no_cs(store):
+        return {"skipped": "no_cs"}          # piață fără coadă CS — nu rutăm blocați la CS
     cfg = await resolver.resolve_capability(db, store, "blocklist")
     if not cfg.get("enabled"):
         return {"skipped": "off"}

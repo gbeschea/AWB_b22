@@ -26,6 +26,9 @@ from services.utils import (
     parse_timestamp,
     get_payment_mapping,
     calculate_and_set_derived_status,
+    recipient_email,
+    email_from_note_attributes,
+    receiver_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,7 +138,16 @@ async def upsert_order_from_webhook(
         order.customer = _full_name(cust.get("first_name"), cust.get("last_name")) or _full_name(
             sa.get("first_name"), sa.get("last_name")
         )
-        order.shipping_name = _full_name(sa.get("first_name"), sa.get("last_name")) or sa.get("name")
+        # Recipient name courier-safe: dacă e telefon/gunoi (nicio literă) → placeholder `Client <Oraș>`
+        # (paritate xconnector #562); numele reale în orice alfabet trec neatinse.
+        order.shipping_name = receiver_name(
+            _full_name(sa.get("first_name"), sa.get("last_name")) or sa.get("name"), sa.get("city"))
+        # Recipient email: real one from the payload if present (câmp standard SAU note_attributes din
+        # formularul COD, paritate #568), else a synthesized placeholder so couriers that require an
+        # email don't reject the AWB.
+        raw_email = (payload.get("email") or payload.get("contact_email") or cust.get("email")
+                     or email_from_note_attributes(payload.get("note_attributes")))
+        order.shipping_email = recipient_email(raw_email, store, order.name)
         order.shipping_address1 = sa.get("address1")
         order.shipping_address2 = sa.get("address2")
         order.shipping_phone = sa.get("phone") or payload.get("phone")
@@ -150,6 +162,10 @@ async def upsert_order_from_webhook(
     # Line items — the webhook payload is authoritative; rebuild the set.
     line_items = payload.get("line_items") or []
     if line_items:
+        # Preserve already-fetched product tags across the rebuild so we don't re-query Shopify
+        # on every orders/updated delivery (tags rarely change; only new SKUs need a fetch).
+        prev_tags = {(li.sku or "").strip().lower(): li.product_tags
+                     for li in order.line_items if li.sku and li.product_tags}
         order.line_items.clear()
         for item in line_items:
             order.line_items.append(
@@ -157,8 +173,21 @@ async def upsert_order_from_webhook(
                     sku=item.get("sku"),
                     title=item.get("title"),
                     quantity=item.get("quantity"),
+                    product_tags=prev_tags.get((item.get("sku") or "").strip().lower()),
                 )
             )
+        # Enrich the Shopify product tags for any SKU we don't already have them for (best-effort;
+        # a failure just leaves them NULL for the backfill endpoint to pick up later).
+        need = [li.sku for li in order.line_items if li.sku and not li.product_tags]
+        if need:
+            try:
+                from services import shopify_service
+                tag_map = await shopify_service.get_variant_product_tags(store, need)
+                for li in order.line_items:
+                    if li.sku and not li.product_tags:
+                        li.product_tags = tag_map.get(li.sku.strip().lower())
+            except Exception as e:
+                logger.info("product-tags enrich failed for %s: %s", order.name, e)
 
     # Fulfillment tracking → Shipment (so it enters the print queue / AWB tracking).
     for f in payload.get("fulfillments") or []:
@@ -245,8 +274,11 @@ WEBHOOK_HANDLERS = {
 async def process_webhook_event(
     db: AsyncSession, topic: str, store_id: int, payload: Dict[str, Any]
 ) -> None:
-    """Background dispatcher. Runs AFTER the 200 response, so the request-scoped `db` is
-    already being torn down — we open a fresh session here and reload the store."""
+    """Dispatch one webhook to its handler. Called SYNCHRONOUSLY from the route (before the
+    response) so a failure can propagate and Shopify retries — it used to run after a 200 was
+    already sent, which lost the event permanently. It still opens its OWN session rather than
+    reusing the request-scoped one, so the transaction boundary belongs to the handler.
+    Raises on handler failure; the route turns that into a 500."""
     handler = WEBHOOK_HANDLERS.get(topic)
     if not handler:
         logger.warning("No handler for webhook topic=%s (shop store_id=%s).", topic, store_id)
@@ -259,4 +291,8 @@ async def process_webhook_event(
         try:
             await handler(session, store, payload)
         except Exception:
+            # RE-RAISE. Swallowing here is what made a failed orders/create vanish: the route had
+            # already returned 200, so Shopify never retried and the order simply never existed.
+            # The caller now returns 500 on this, and Shopify redelivers. Handlers are idempotent.
             logger.exception("Webhook handler crashed: topic=%s store_id=%s", topic, store_id)
+            raise

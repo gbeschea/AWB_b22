@@ -25,6 +25,7 @@ from sqlalchemy.orm import selectinload
 
 import models
 from services.settings import resolver
+from services.utils import no_cs
 
 logger = logging.getLogger("cron_parity.duplicates")
 
@@ -127,7 +128,7 @@ async def run_shadow(db, store: models.Store) -> Dict[str, int]:
         for o, decision, why in decisions:
             stats[decision.replace("-", "_")] += 1
             logger.info("DUP store=%s order=%s -> %s (%s)", store.id, o.name, decision, why)
-            if decision == "held":
+            if decision == "held" and not no_cs(store):   # NO_CS: nu rutăm dublurile la o coadă nelucrată
                 # order_id e UNIC pe cs_queue_items (o intrare per comandă) → nu adaug peste una existentă
                 exists = (await db.execute(
                     select(models.CSQueueItem.id).where(models.CSQueueItem.order_id == o.id)
