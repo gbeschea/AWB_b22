@@ -14,7 +14,7 @@ from typing import Any, Dict
 
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 import models
@@ -105,7 +105,7 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
             resolved[pid] = await _profile_base(db, store, pid)
         return resolved[pid]
 
-    created, errors, no_route, waiting_multi, dup_flagged = [], [], 0, 0, 0
+    created, errors, no_route, waiting_multi = [], [], 0, 0
     by_account: Dict[str, list] = {}
     for o in orders:
         # Precedence: a manually-assigned profile > a matching rule > the store default profile.
@@ -134,15 +134,6 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
                 await db.commit()
                 waiting_multi += 1
                 continue
-            # DUPLICATE guard: same customer, another live order in the window → flag to CS, don't AWB
-            # (never double-ship a re-ordered COD). A human decides which to keep — we never auto-cancel.
-            dup = await _duplicate_sibling(db, store, o)
-            if dup:
-                from routes.cs_queue import enqueue_order
-                await enqueue_order(db, store, o, reason="duplicate", detail=dup, created_by="auto")
-                await db.commit()
-                dup_flagged += 1
-                continue
             r = await _create_one(db, store, o, account_key, opts)
             await db.commit()
             created.append(r["awb"])
@@ -157,10 +148,10 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
             await _request_pickup(db, store, acct_key, awbs, {})
         except Exception:
             pass
-    logger.info("auto-awb %s: created=%d errors=%d no-route=%d waiting-multi=%d duplicates=%d",
-                store.domain, len(created), len(errors), no_route, waiting_multi, dup_flagged)
+    logger.info("auto-awb %s: created=%d errors=%d no-route=%d waiting-multi=%d",
+                store.domain, len(created), len(errors), no_route, waiting_multi)
     return {"created": len(created), "errors": len(errors), "no_route": no_route,
-            "waiting_multi_location": waiting_multi, "duplicates_flagged": dup_flagged}
+            "waiting_multi_location": waiting_multi}
 
 
 async def _spans_multiple_locations(store, order) -> bool:
@@ -177,37 +168,6 @@ async def _spans_multiple_locations(store, order) -> bool:
     except Exception as e:
         logger.info("multi-location check failed for %s: %s", getattr(order, "name", "?"), e)
         return False
-
-
-async def _duplicate_sibling(db, store: models.Store, order: models.Order):
-    """If the store has duplicate detection on and this order looks like a duplicate of another (same
-    phone/email within the window, not cancelled), return a short detail string; else None. Safe by
-    design: we only FLAG to CS — a human decides which to keep — never auto-cancel."""
-    cs = getattr(store, "cs_settings", None) or {}
-    if not cs.get("duplicate_enabled"):
-        return None
-    match = (cs.get("duplicate_match") or "phone").lower()
-    window_h = int(cs.get("duplicate_window_hours") or 24)
-    # 'address' has no blind index (encrypted at rest) → fall back to phone.
-    if match == "email":
-        col, val = models.Order.shipping_email_bidx, order.shipping_email_bidx
-    else:
-        col, val, match = models.Order.shipping_phone_bidx, order.shipping_phone_bidx, "phone"
-    if not val:
-        return None
-    anchor = order.created_at or datetime.now(timezone.utc)
-    since, until = anchor - timedelta(hours=window_h), anchor + timedelta(hours=window_h)
-    n = (await db.execute(
-        select(func.count()).select_from(models.Order).where(
-            models.Order.store_id == store.id,
-            models.Order.id != order.id,
-            models.Order.cancelled_at.is_(None),
-            col == val,
-            models.Order.created_at >= since,
-            models.Order.created_at <= until,
-        )
-    )).scalar() or 0
-    return f"Posibil duplicat: {n} comand(ă/i) cu același {match} în ±{window_h}h" if n else None
 
 
 async def run_all() -> Dict[str, Any]:
