@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 import models
+from services.settings import resolver
 
 logger = logging.getLogger("cron_parity.duplicates")
 
@@ -48,10 +49,12 @@ def _has_shipped(order: Any) -> bool:
     if getattr(order, "fulfilled_at", None):
         return True
     for sh in (order.shipments or []):
-        st = (getattr(sh, "status", None) or getattr(sh, "derived_status", "") or "").lower()
-        if st in _SHIPPED:
+        st = (getattr(sh, "last_status", None) or getattr(sh, "derived_status", "") or "").lower()
+        # AWB creat (ne-anulat) = comanda pleacă / e la curier → protecție ghost-AWB (#549/#550/#557).
+        # Shipment are `awb`/`last_status`/`derived_status` — NU `status`/`tracking_number` (nu le mai citim).
+        if getattr(sh, "awb", None) and st not in ("canceled", "cancelled", "failed", "void", "voided"):
             return True
-        if getattr(sh, "tracking_number", None) and st not in ("canceled", "cancelled", "failed"):
+        if st in _SHIPPED:
             return True
     return False
 
@@ -97,8 +100,11 @@ def resolve_group(orders: List[Any]) -> List[Tuple[Any, str, str]]:
 
 async def run_shadow(db, store: models.Store) -> Dict[str, int]:
     """Detectează + rezolvă în LOG-ONLY pe comenzile din fereastra magazinului. HOLD → CSQueueItem."""
-    hours = int(getattr(store, "duplicate_window_hours", None) or 24)
-    match = (getattr(store, "duplicate_match", None) or "phone").lower()
+    cfg = await resolver.resolve_capability(db, store, "duplicates")   # preset moștenit org→magazin
+    if not cfg.get("enabled"):
+        return {"skipped": "off"}
+    hours = int(cfg.get("duplicate_window_hours") or 24)
+    match = (cfg.get("duplicate_match") or "phone").lower()
     floor = datetime.now(timezone.utc) - timedelta(hours=hours)
     rows = (await db.execute(
         select(models.Order)

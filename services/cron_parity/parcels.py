@@ -49,24 +49,40 @@ def parcel_count(order: Any, box_map: Dict[str, float]) -> int:
 
 
 async def run_shadow(db, store: models.Store, hours: int = 48) -> Dict[str, int]:
+    """Calculează coletele pe comenzile PENDING (fără AWB) și le MEMOREAZĂ în `order.parcel_count` — câmp
+    OH-intern pe care auto_awb_service îl citește la creare AWB („preia + își memorează", cererea owner-ului).
+    Scriere SIGURĂ: doar OH-intern (nu atinge Shopify, nu creează AWB), doar când calculăm ≥2 colete (unde
+    default-ul 1 ar fi GREȘIT) ȘI câmpul e încă gol — un metafield `parcel-count` deja sincronizat NU se suprascrie."""
     box_map = await _box_map(db)
     if not box_map:
         return {"skipped": 1}            # map-ul nu e sincronizat încă — nimic de comparat
     floor = datetime.now(timezone.utc) - timedelta(hours=hours)
+    has_awb = select(models.Shipment.id).where(
+        models.Shipment.order_id == models.Order.id, models.Shipment.awb.isnot(None))
     rows = (await db.execute(
         select(models.Order)
         .options(selectinload(models.Order.line_items))
         .where(models.Order.store_id == store.id,
                models.Order.created_at >= floor,
                models.Order.cancelled_at.is_(None),
-               models.Order.fulfilled_at.is_(None))
+               models.Order.fulfilled_at.is_(None),
+               ~has_awb.exists())          # doar comenzi care încă vor primi AWB
     )).scalars().all()
-    stats = {"orders": 0, "multi_parcel": 0}
+    stats = {"orders": 0, "multi_parcel": 0, "memoized": 0}
     for o in rows:
         stats["orders"] += 1
         n = parcel_count(o, box_map)
         if n >= 2:
             stats["multi_parcel"] += 1
-            logger.info("PARCELS store=%s order=%s -> %d colete (default-ul 1 ar fi greșit la AWB)",
-                        store.id, o.name, n)
+            # memorează DOAR dacă nu avem deja o valoare (din metafield sau memoizare anterioară)
+            if getattr(o, "parcel_count", None) in (None, 0):
+                o.parcel_count = n
+                stats["memoized"] += 1
+                logger.info("PARCELS store=%s order=%s -> memorez %d colete (default-ul 1 ar fi greșit la AWB)",
+                            store.id, o.name, n)
+            else:
+                logger.info("PARCELS store=%s order=%s -> %d colete (deja setat=%s, nu suprascriu)",
+                            store.id, o.name, n, o.parcel_count)
+    if stats["memoized"]:
+        await db.commit()
     return stats

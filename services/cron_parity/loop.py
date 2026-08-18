@@ -1,6 +1,6 @@
 """
-loop.py — bucla de fundal SHADOW a parității de cron: la fiecare 15 min rulează cele 4 detectoare
-(duplicate, COD capture, surpriză, colete) pe fiecare magazin, LOG-ONLY (logger `cron_parity`).
+loop.py — bucla de fundal SHADOW a parității de cron: la fiecare 15 min rulează detectoarele
+(duplicate, blocklist, COD capture, surpriză, colete) pe fiecare magazin, LOG-ONLY (logger `cron_parity`).
 Pornită din main.py DOAR cu env CRON_PARITY_SHADOW=1. Fail-safe: orice excepție e logată și bucla
 continuă — nu poate afecta aplicația (modelul ADDR_SHADOW).
 """
@@ -20,12 +20,12 @@ INTERVAL_S = int(os.environ.get("CRON_PARITY_INTERVAL_S", "900"))
 
 async def _pass_once() -> None:
     from database import AsyncSessionLocal
-    from . import cod_capture, duplicates, parcels, surprise
+    from . import blocklist, cod_capture, duplicates, parcels, surprise
     async with AsyncSessionLocal() as db:
         stores = (await db.execute(select(models.Store))).scalars().all()
         for store in stores:
-            for name, mod in (("duplicates", duplicates), ("cod_capture", cod_capture),
-                              ("surprise", surprise), ("parcels", parcels)):
+            for name, mod in (("duplicates", duplicates), ("blocklist", blocklist),
+                              ("cod_capture", cod_capture), ("surprise", surprise), ("parcels", parcels)):
                 try:
                     stats = await mod.run_shadow(db, store)
                     interesting = {k: v for k, v in (stats or {}).items() if v}

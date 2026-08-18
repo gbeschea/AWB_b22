@@ -29,6 +29,7 @@ from routes import (
     scan as scan_routes,
     spa as spa_routes,
     legal as legal_routes,
+    hub_settings as hub_settings_routes,
 )
 from websocket_manager import manager
 from settings import settings
@@ -95,6 +96,7 @@ app.include_router(order_actions_routes.router)
 app.include_router(cs_queue_routes.router)
 app.include_router(cs_queue_routes.config_router)
 app.include_router(org_routes.router)
+app.include_router(hub_settings_routes.router)
 app.include_router(webhooks.router, tags=["Webhooks"])
 app.include_router(couriers_routes.data_router)
 app.include_router(print_ops_routes.router)

@@ -445,13 +445,51 @@ class AddressValidation(Base):
 
 class ValidationPolicy(Base):
     # Politicile ALEGIBILE ale validării (toggle-urile de business), separate de regulile de corectitudine
-    # (cod). O linie cu store_id NULL = default global; altfel override per magazin. `policies` = JSONB cu
-    # cheile din services/nomenclator/policy.py::POLICY_DEFAULTS (cheile lipsă cad pe defaults).
+    # (cod). Moștenire pe 3 niveluri (services/settings/resolver.py): store_id&organization_id NULL = GLOBAL;
+    # organization_id set + store_id NULL = nivel ORGANIZAȚIE; store_id set = override MAGAZIN. `policies` =
+    # JSONB cu cheile din services/nomenclator/policy.py::POLICY_DEFAULTS (cheile lipsă cad pe nivelul de sus).
     __tablename__ = 'validation_policy'
+    # oglindește indexul unic parțial din awb_parity_migrate.sql, ca alembic autogenerate să NU-l șteargă
+    __table_args__ = (
+        sa.Index('uq_validation_policy_org', 'organization_id', unique=True,
+                 postgresql_where=sa.text('store_id IS NULL AND organization_id IS NOT NULL')),
+    )
     id = Column(Integer, primary_key=True)
     store_id = Column(Integer, ForeignKey('stores.id'), nullable=True, unique=True, index=True)
+    organization_id = Column(Integer, ForeignKey('organizations.id'), nullable=True, index=True)
     policies = Column(JSONB, nullable=False, server_default='{}')
     updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class HubSettings(Base):
+    # Setările de CAPABILITATE (duplicates, blocklist, …) ca blob JSONB, moștenite org→magazin (resolver.py).
+    # organization_id set + store_id NULL = nivel ORGANIZAȚIE (toate magazinele moștenesc); store_id set =
+    # override MAGAZIN. settings = { "<capabilitate>": {"preset": "...", <knob brute Avansat>} }.
+    __tablename__ = 'hub_settings'
+    __table_args__ = (
+        sa.Index('uq_hub_settings_org', 'organization_id', unique=True,
+                 postgresql_where=sa.text('store_id IS NULL AND organization_id IS NOT NULL')),
+    )
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey('organizations.id'), nullable=True, index=True)
+    store_id = Column(Integer, ForeignKey('stores.id'), nullable=True, unique=True, index=True)
+    settings = Column(JSONB, nullable=False, server_default='{}')
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class BlocklistEntry(Base):
+    # Clienți BLOCAȚI manual (îi punem noi din UI/CS) — comanda lor NU primește auto-AWB (cronul o anulează).
+    # Serial-refuser NU se stochează aici; se calculează la rulare din istoricul de shipments (blocklist.py).
+    # Matching pe BLIND-INDEX (fără decriptare PII). store_id NULL = intrare globală (toate magazinele).
+    __tablename__ = 'blocklist'
+    id = Column(Integer, primary_key=True)
+    store_id = Column(Integer, ForeignKey('stores.id'), nullable=True, index=True)
+    match_type = Column(String(16), nullable=False)                        # phone | email
+    value_bidx = Column(String(64), nullable=False, index=True)
+    reason = Column(Text, nullable=True)
+    source = Column(String(16), nullable=False, server_default='manual')   # manual | serial_refuser
+    active = Column(Boolean, nullable=False, server_default=sa.text('true'))
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
 
 class ShipmentProfile(Base):
     __tablename__ = 'shipment_profiles'

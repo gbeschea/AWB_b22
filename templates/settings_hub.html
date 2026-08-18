@@ -1,0 +1,182 @@
+{% extends "_layout.html" %}
+{% block title %}Automatizări - Order Hub{% endblock %}
+
+{% block head_extra %}
+<style>
+  .hub-scope { display:flex; gap:1rem; align-items:end; flex-wrap:wrap; margin-bottom:1.5rem; }
+  .hub-scope > div { margin:0; }
+  .cap-card { border:1px solid var(--pico-muted-border-color); border-radius:.6rem; padding:1rem 1.2rem; margin-bottom:.9rem; }
+  .cap-head { display:flex; align-items:center; gap:.8rem; flex-wrap:wrap; }
+  .cap-head h3 { margin:0; font-size:1.05rem; }
+  .cap-head .grow { flex:1; }
+  .cap-help { color:var(--pico-muted-color); font-size:.85rem; margin:.25rem 0 0; }
+  .badge { font-size:.7rem; font-weight:600; padding:.15rem .5rem; border-radius:1rem; white-space:nowrap; }
+  .badge.default { background:#eef; color:#446; }
+  .badge.org { background:#e6f0ff; color:#1a56db; }
+  .badge.store { background:#fff4e0; color:#b45309; }
+  .badge.per_store { background:#f0f0f0; color:#666; }
+  .badge.on { background:#e7f6ec; color:#137a3e; }
+  .badge.off { background:#fdeaea; color:#b02a2a; }
+  .cap-controls { display:flex; gap:.8rem; align-items:center; flex-wrap:wrap; margin-top:.6rem; }
+  .cap-controls select { margin:0; max-width:16rem; }
+  .cap-controls label { margin:0; }
+  details.adv { margin-top:.5rem; }
+  details.adv summary { cursor:pointer; color:var(--pico-primary); font-size:.85rem; }
+  .adv-note { font-size:.82rem; color:var(--pico-muted-color); margin:.4rem 0; }
+  .adv-field { display:flex; align-items:center; gap:.7rem; margin:.45rem 0; font-size:.85rem; }
+  .adv-field label { margin:0; color:var(--pico-muted-color); min-width:13rem; }
+  .adv-field input[type=number], .adv-field select { margin:0; max-width:11rem; }
+  .adv-field input[type=checkbox] { margin:0; width:auto; }
+  #saved { position:fixed; bottom:1rem; right:1rem; background:#137a3e; color:#fff; padding:.5rem 1rem;
+           border-radius:.5rem; opacity:0; transition:opacity .2s; }
+  #saved.show { opacity:1; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom:.4rem;">⚡ Automatizări</h1>
+<p class="cap-help" style="margin-bottom:1.2rem;">
+  Un magazin nou <strong>moștenește tot</strong> din organizație — atingi ceva doar unde chiar diferă.
+  Fiecare automatizare = un comutator + un preset; detaliile fine stau sub „Avansat".
+</p>
+
+<div class="hub-scope">
+  <div>
+    <label for="scope">Configurez pentru</label>
+    <select id="scope">
+      <optgroup label="Organizație (o dată, toate magazinele moștenesc)">
+        {% for o in organizations %}<option value="org:{{ o.id }}">🏢 {{ o.name or ('Organizația #' ~ o.id) }}</option>{% endfor %}
+        {% if not organizations %}<option value="org:0" disabled>— nicio organizație —</option>{% endif %}
+      </optgroup>
+      <optgroup label="Un singur magazin (override)">
+        {% for s in stores %}<option value="store:{{ s.id }}">🏬 {{ s.name }}</option>{% endfor %}
+      </optgroup>
+    </select>
+  </div>
+</div>
+
+<div id="caps"><p aria-busy="true">Se încarcă…</p></div>
+<div id="saved">Salvat ✓</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PRESET_LABELS = {
+  off:"Oprit", conservator:"Conservator", echilibrat:"Echilibrat (recomandat)", agresiv:"Agresiv",
+  strict:"Strict", generos:"Generos"
+};
+const SRC_LABELS = { default:"Implicit", org:"Din organizație", store:"Suprascris pe magazin", per_store:"Se setează pe magazin" };
+
+const scopeSel = document.getElementById('scope');
+const capsEl = document.getElementById('caps');
+
+function curScope(){ const [scope,id] = scopeSel.value.split(':'); return {scope, id:parseInt(id)}; }
+
+async function load(){
+  const {scope,id} = curScope();
+  capsEl.innerHTML = '<p aria-busy="true">Se încarcă…</p>';
+  const r = await fetch(`/settings/hub/state?scope=${scope}&id=${id}`);
+  const data = await r.json();
+  render(data);
+}
+
+function render(data){
+  const {scope} = curScope();
+  capsEl.innerHTML = '';
+  for(const c of data.capabilities){
+    const card = document.createElement('article'); card.className='cap-card';
+    // header: titlu + badge stare + badge sursă
+    const head = document.createElement('div'); head.className='cap-head';
+    const enBadge = c.enabled===null ? '' :
+      `<span class="badge ${c.enabled?'on':'off'}">${c.enabled?'PORNIT':'OPRIT'}</span>`;
+    const srcBadge = `<span class="badge ${c.source}">${SRC_LABELS[c.source]||c.source}</span>`;
+    head.innerHTML = `<h3>${c.label}</h3>${enBadge}<span class="grow"></span>${srcBadge}`;
+    card.appendChild(head);
+    const help = document.createElement('p'); help.className='cap-help'; help.textContent=c.help; card.appendChild(help);
+
+    const controls = document.createElement('div'); controls.className='cap-controls';
+    if(c.column){   // capabilități pe coloane (auto_awb, status_sync, invoicing) — flag autoritativ de la rută
+      // capabilitate pe coloane — se editează per magazin în pagina de magazine
+      const note = document.createElement('span'); note.className='adv-note';
+      note.innerHTML = scope==='store'
+        ? `Detalii (fereastră, notificări, restock…) → <a href="/settings/stores">editorul magazinului</a>.`
+        : `Se configurează per magazin → <a href="/settings/stores">Magazine</a>.`;
+      controls.appendChild(note);
+    } else if(c.presets){
+      // selector de preset (+ opțiunea moștenește la scope=store)
+      const sel = document.createElement('select');
+      if(scope==='store'){
+        const inh = document.createElement('option'); inh.value='inherit';
+        inh.textContent = `↳ Moștenește (${PRESET_LABELS[c.preset]||c.preset})`;
+        sel.appendChild(inh);
+      }
+      for(const p of c.presets){
+        const o=document.createElement('option'); o.value=p; o.textContent=PRESET_LABELS[p]||p; sel.appendChild(o);
+      }
+      sel.value = (scope==='store' && c.source!=='store') ? 'inherit' : c.preset;
+      sel.addEventListener('change', ()=>save(c.key, sel.value));
+      const lab=document.createElement('label'); lab.textContent='Preset:'; controls.appendChild(lab);
+      controls.appendChild(sel);
+    }
+    card.appendChild(controls);
+
+    // Avansat (colapsat) — knob-urile brute editabile (peste preset) + link la editoare externe
+    if(!c.column){
+      const adv=document.createElement('details'); adv.className='adv';
+      const sum=document.createElement('summary'); sum.textContent='Avansat'; adv.appendChild(sum);
+      if(Array.isArray(c.advanced)){
+        for(const f of c.advanced){
+          const wrap=document.createElement('div'); wrap.className='adv-field';
+          const lab=document.createElement('label'); lab.textContent=f.label; wrap.appendChild(lab);
+          const cur = c.values ? c.values[f.key] : undefined;
+          let inp;
+          if(f.type==='bool'){
+            inp=document.createElement('input'); inp.type='checkbox'; inp.checked=!!cur;
+            inp.addEventListener('change', ()=>saveAdv(c.key, f.key, inp.checked));
+          } else if(f.type==='enum'){
+            inp=document.createElement('select');
+            for(const o of (f.options||[])){ const op=document.createElement('option'); op.value=o; op.textContent=o; inp.appendChild(op); }
+            if(cur!==undefined && cur!==null) inp.value=String(cur);
+            inp.addEventListener('change', ()=>saveAdv(c.key, f.key, inp.value));
+          } else { // int
+            inp=document.createElement('input'); inp.type='number';
+            if(cur!==undefined && cur!==null) inp.value=cur;
+            inp.addEventListener('change', ()=>saveAdv(c.key, f.key, inp.value===''?null:parseInt(inp.value,10)));
+          }
+          wrap.appendChild(inp); adv.appendChild(wrap);
+        }
+      }
+      if(c.advanced_link){
+        const p=document.createElement('p'); p.className='adv-note';
+        p.innerHTML = `Politici detaliate → <a href="${c.advanced_link}">editorul de politici</a>.`;
+        adv.appendChild(p);
+      }
+      const body=document.createElement('div'); body.className='adv-note';
+      body.textContent = 'Valori efective: ' + JSON.stringify(c.values);
+      adv.appendChild(body); card.appendChild(adv);
+    }
+    capsEl.appendChild(card);
+  }
+}
+
+async function save(capability, preset){
+  const {scope,id}=curScope();
+  await fetch('/settings/hub/set', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({scope, id, capability, preset})});
+  const s=document.getElementById('saved'); s.classList.add('show'); setTimeout(()=>s.classList.remove('show'),1200);
+  load(); // re-încarcă ca să reflecte noul badge de sursă
+}
+
+// schimbarea unui câmp Avansat: trimite DOAR advanced (fără preset) → păstrează presetul, suprapune knob-ul
+async function saveAdv(capability, key, val){
+  const {scope,id}=curScope();
+  await fetch('/settings/hub/set', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({scope, id, capability, advanced:{[key]: val}})});
+  const s=document.getElementById('saved'); s.classList.add('show'); setTimeout(()=>s.classList.remove('show'),1200);
+  load();
+}
+
+scopeSel.addEventListener('change', load);
+load();
+</script>
+{% endblock %}

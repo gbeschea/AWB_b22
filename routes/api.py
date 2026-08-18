@@ -1762,7 +1762,8 @@ async def get_validation_policies(
     """Politicile alegibile: defaults (cod) + override-ul GLOBAL (rândul cu store_id NULL) + efectivul."""
     from services.nomenclator.policy import POLICY_DEFAULTS, merge_policy
     row = (await db.execute(
-        select(models.ValidationPolicy).where(models.ValidationPolicy.store_id.is_(None))
+        select(models.ValidationPolicy).where(models.ValidationPolicy.store_id.is_(None),
+                                              models.ValidationPolicy.organization_id.is_(None))
     )).scalar_one_or_none()
     overrides = dict(row.policies or {}) if row else {}
     return {"defaults": POLICY_DEFAULTS, "overrides": overrides, "effective": merge_policy(overrides)}
@@ -1783,7 +1784,8 @@ async def put_validation_policies(
         raise HTTPException(status_code=400, detail=f"Politici necunoscute: {', '.join(sorted(unknown))}")
     overrides = {k: v for k, v in incoming.items() if v is not None and v != POLICY_DEFAULTS[k]}
     row = (await db.execute(
-        select(models.ValidationPolicy).where(models.ValidationPolicy.store_id.is_(None))
+        select(models.ValidationPolicy).where(models.ValidationPolicy.store_id.is_(None),
+                                              models.ValidationPolicy.organization_id.is_(None))
     )).scalar_one_or_none()
     if row is None:
         row = models.ValidationPolicy(store_id=None, policies=overrides)
