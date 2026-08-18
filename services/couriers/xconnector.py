@@ -162,6 +162,25 @@ class XConnectorCourier(BaseCourier):
         r.raise_for_status()
         return r.content
 
+    async def _invoice_pdf_url(self, creds: Dict[str, Any], shopify_order_id: str) -> Optional[str]:
+        """URL-ul PDF al facturii (doc INVOICE) din xConnector pt o comandă (best-effort pe numele câmpului)."""
+        o = await self.xc_order_by_shopify_id(creds, shopify_order_id)
+        doc = self._doc(o, "INVOICE") or {}
+        return (doc.get("fileUrl") or doc.get("url") or doc.get("invoiceUrl")
+                or doc.get("documentUrl") or doc.get("downloadUrl"))
+
+    async def get_invoice(self, db: AsyncSession, order: models.Order, account_key: str) -> bytes:
+        """Descarcă PDF-ul facturii (doc INVOICE) din xConnector — oglindă la get_label."""
+        creds = await self.get_credentials(db, account_key)
+        if not creds or not creds.get("api_key"):
+            raise RuntimeError("xConnector: cont fără api_key")
+        url = await self._invoice_pdf_url(creds, order.shopify_order_id or "")
+        if not url:
+            raise RuntimeError("xConnector: factura nu are URL de PDF (e creată?)")
+        r = await self.http.get(url, headers=self._headers(creds))
+        r.raise_for_status()
+        return r.content
+
     async def track_awb(self, db: AsyncSession, awb: str, account_key: Optional[str] = None) -> TrackingResponse:
         """xConnector nu e sursă de tracking live — statusul vine de la curierul real (adapterul
         DPD/etc. al OH). Întoarcem ce știe xConnector despre comandă (best-effort)."""
@@ -207,7 +226,10 @@ class XConnectorCourier(BaseCourier):
         o = await self.xc_order_by_shopify_id(creds or {}, order.shopify_order_id or "") if creds else {}
         if o and self._doc(o, "INVOICE"):
             return {"success": False, "message": "are DEJA factură — folosește cancel + create (regen)"}
-        return await self._invoice_action(db, order, account_key, "/api/actions/create-invoice", lang=lang)
+        res = await self._invoice_action(db, order, account_key, "/api/actions/create-invoice", lang=lang)
+        if res.get("success") and creds:
+            res["url"] = await self._invoice_pdf_url(creds, order.shopify_order_id or "")
+        return res
 
     async def cancel_invoice(self, db: AsyncSession, order: models.Order, account_key: str) -> Dict[str, Any]:
         return await self._invoice_action(db, order, account_key, "/api/actions/cancel-invoice")

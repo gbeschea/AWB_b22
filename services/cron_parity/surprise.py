@@ -28,6 +28,15 @@ _GIFTBOX = "cutie-cadou"
 _SURPRISE = "surpriz"          # prinde 'surpriza-*' (SKU) și „Parfum surpriză" (titlu, NUB SKU numeric)
 _OPTOUT_TAG = "farasurpriza"
 
+# Surpriza-parfum se aplică DOAR brandurilor de parfum (owner): Esteban, George Talent, Lab Noir, Nubra.
+# Restul magazinelor n-au parfum → sar complet (altfel = zgomot în shadow + greșit la go-live).
+_SURPRISE_SHOPS = {
+    "6f9e22-9d.myshopify.com",   # esteban.ro
+    "ix5bxc-hr.myshopify.com",   # georgetalent.ro
+    "31k0py-bi.myshopify.com",   # labnoir.ro
+    "bmuwvv-jy.myshopify.com",   # nubra.ro
+}
+
 
 def analyze(order: Any) -> int:
     """Câte surprize AR TREBUI să aibă comanda (0 = nu se aplică / are deja / opt-out)."""
@@ -36,8 +45,9 @@ def analyze(order: Any) -> int:
     if _OPTOUT_TAG in (order.tags or "").lower():
         return 0
     for sh in (order.shipments or []):
-        if getattr(sh, "tracking_number", None):
-            return 0               # AWB-ul există deja — cursa e pierdută, nu mai atingem (regula owner)
+        if getattr(sh, "awb", None):
+            return 0               # AWB-ul există deja (câmpul e `awb`, NU `tracking_number`) — cursa e
+                                   # pierdută, nu mai atingem (regula owner; altfel = supra-cadou)
     has_box = False
     perfumes = 0
     for li in (order.line_items or []):
@@ -58,6 +68,8 @@ def analyze(order: Any) -> int:
 
 
 async def run_shadow(db, store: models.Store, hours: int = 24) -> Dict[str, int]:
+    if store.domain not in _SURPRISE_SHOPS:
+        return {"skipped": "not-a-surprise-shop"}
     floor = datetime.now(timezone.utc) - timedelta(hours=hours)
     rows = (await db.execute(
         select(models.Order)
