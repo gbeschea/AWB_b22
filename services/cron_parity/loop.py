@@ -24,8 +24,9 @@ async def _pass_once() -> None:
     async with AsyncSessionLocal() as db:
         stores = (await db.execute(select(models.Store))).scalars().all()
         for store in stores:
-            for name, mod in (("duplicates", duplicates), ("blocklist", blocklist),
-                              ("cod_capture", cod_capture), ("surprise", surprise), ("parcels", parcels)):
+            # duplicate / parcele / surpriză rulează acum LA COMANDĂ (webhook → cron_parity.order_shadow).
+            # Bucla păstrează doar ce e batch pe status/livrare: blocklist (serial-refuser) + cod_capture.
+            for name, mod in (("blocklist", blocklist), ("cod_capture", cod_capture)):
                 try:
                     stats = await mod.run_shadow(db, store)
                     interesting = {k: v for k, v in (stats or {}).items() if v}

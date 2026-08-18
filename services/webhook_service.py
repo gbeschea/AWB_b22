@@ -33,6 +33,9 @@ from services.utils import (
 
 logger = logging.getLogger(__name__)
 
+# Background per-order shadow tasks (keep strong refs so they aren't GC'd mid-run).
+_ORDER_SHADOW_TASKS: set = set()
+
 
 # --- small payload helpers -------------------------------------------------
 
@@ -239,6 +242,19 @@ async def upsert_order_from_webhook(
         logger.exception("Derived-status calc failed (webhook) for %s", order.name)
 
     await db.commit()
+
+    # Per-order parity shadow (duplicate + parcele + surpriză) — rulate LA COMANDĂ, într-o sesiune
+    # PROPRIE, DUPĂ commit: webhook-ul rămâne rapid și o eroare aici nu poate rupe ingestul. Înlocuiește
+    # sweep-ul de 15 min pentru aceste detectoare (validarea de adresă a rulat deja mai sus).
+    try:
+        import asyncio
+        from services.cron_parity import order_shadow
+        _t = asyncio.create_task(order_shadow.run_for_order(store.id, order.id))
+        _ORDER_SHADOW_TASKS.add(_t)
+        _t.add_done_callback(_ORDER_SHADOW_TASKS.discard)
+    except Exception:
+        logger.exception("could not schedule per-order shadow for %s", order.name)
+
     logger.info(
         "Webhook %s order %s for shop=%s.",
         "created" if is_new else "updated", order.name, store.domain,
