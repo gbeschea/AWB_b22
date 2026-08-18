@@ -1116,6 +1116,8 @@ export interface InvoiceSettings {
   client_tax_payer: boolean; default_product_code: string;
   invoice_shipping: boolean; shipping_name: string; shipping_code: string;
   shipping_vat_rate: number | null;
+  // which connector issues invoices: "xconnector" (store's SmartBill via xConnector) | "smartbill" (server)
+  invoice_via?: string;
 }
 export function getInvoiceSettings() {
   return authFetch<InvoiceSettings>(`/api/invoice-settings`);
