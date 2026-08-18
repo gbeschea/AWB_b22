@@ -28,6 +28,13 @@ from . import blocklist, duplicates, parcels, surprise
 
 logger = logging.getLogger("cron_parity")
 
+# GARDĂ DE POOL: un task per webhook, iar seara webhook-urile (orders/updated) curg în valuri — fără limită,
+# zeci de task-uri concurente epuizează QueuePool-ul (5+10) și 500-ează TOT app-ul (incident 18-aug seara).
+# Max N task-uri ating DB-ul simultan; restul așteaptă la semafor (nu țin conexiuni). + dedupe per comandă.
+import os as _os
+_SEM = asyncio.Semaphore(int(_os.environ.get("ORDER_SHADOW_CONCURRENCY", "3")))
+_INFLIGHT: set = set()
+
 
 # ── detectoare per-comandă (întorc True dacă au scris ceva OH-intern) ──────────────────────────
 
@@ -164,22 +171,27 @@ _HANDLERS = {
 
 
 async def run_for_order(store_id: int, order_id: int) -> None:
-    """Fire-and-forget din webhook DUPĂ commit. Rulează detectoarele cu mod `on_order` (cu delay), izolat."""
+    """Fire-and-forget din webhook DUPĂ commit. Rulează detectoarele cu mod `on_order` (cu delay), izolat.
+    Gardat de semafor (pool) + dedupe (o comandă nu rulează de 2 ori simultan la rafale de orders/updated)."""
+    if order_id in _INFLIGHT:
+        return
+    _INFLIGHT.add(order_id)
     try:
-        # 1) programarea: care detectoare on_order + delay (sesiune scurtă, ca să nu ținem sesiune peste sleep)
-        async with AsyncSessionLocal() as db:
-            store = await db.get(models.Store, store_id)
-            if not store:
-                return
-            on_order = [k for k in automation_config.ON_ORDER_DETECTORS
-                        if automation_config.mode_of(store, k) == "on_order"]
-            if not on_order:
-                return
-            delay = max((automation_config.minutes_of(store, k) for k in on_order), default=0)
+        # 1) programarea: care detectoare on_order + delay (sesiune scurtă, sub semafor)
+        async with _SEM:
+            async with AsyncSessionLocal() as db:
+                store = await db.get(models.Store, store_id)
+                if not store or not store.is_active:
+                    return
+                on_order = [k for k in automation_config.ON_ORDER_DETECTORS
+                            if automation_config.mode_of(store, k) == "on_order"]
+                if not on_order:
+                    return
+                delay = max((automation_config.minutes_of(store, k) for k in on_order), default=0)
         if delay > 0:
-            await asyncio.sleep(min(delay, 120) * 60)     # cap 2h ca să nu ținem task infinit
-        # 2) rulează, în sesiune proprie
-        async with AsyncSessionLocal() as db:
+            await asyncio.sleep(min(delay, 120) * 60)     # sleep FĂRĂ semafor/sesiune ținute
+        # 2) rulează, în sesiune proprie, sub semafor
+        async with _SEM, AsyncSessionLocal() as db:
             store = await db.get(models.Store, store_id)
             order = (await db.execute(
                 select(models.Order)
@@ -203,3 +215,5 @@ async def run_for_order(store_id: int, order_id: int) -> None:
                     logger.warning("ORDER-%s err store=%s order=%s: %s", key, store_id, order_id, e)
     except Exception:
         logger.exception("order-shadow crashed store=%s order=%s", store_id, order_id)
+    finally:
+        _INFLIGHT.discard(order_id)
