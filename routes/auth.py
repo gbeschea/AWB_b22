@@ -168,6 +168,18 @@ async def callback(request: Request, db: AsyncSession = Depends(get_db)):
         store.comp = True
         await db.commit()
 
+    # Store NAME = numele REAL din Shopify (shop.name), nu slug-ul myshopify — altfel „nu știi care-i care"
+    # în picker/scope. Best-effort: dacă nu iese, rămâne slug-ul (fallback-ul de la create).
+    try:
+        client = await shopify_service.authed_client(store)
+        r2 = await client.post("graphql.json", json={"query": "{ shop { name } }"})
+        nm = ((((r2.json() or {}).get("data") or {}).get("shop") or {}).get("name") or "").strip()
+        if nm:
+            store.name = nm[:255]
+            await db.commit()
+    except Exception:
+        _logger.info("could not fetch shop display name for %s", shop)
+
     # Register operational webhooks (app/uninstalled + orders create/updated/edited).
     # Idempotent + self-healing: if this fails now (e.g. PCD not yet granted), the on-load
     # reconcile in /api/me repairs it — no reinstall needed. GDPR webhooks live in the TOML.
