@@ -73,6 +73,10 @@ class Store(Base):
   plan = Column(String(32), default='free', nullable=False)
   subscription_gid = Column(String(255), nullable=True)
   subscription_status = Column(String(32), nullable=True)
+  # COMP: our OWN stores get the Pro entitlement (unlimited labels) WITHOUT a Shopify subscription — it's our
+  # app on our own shops, so paying Shopify's revenue-share on circular money makes no sense. entitled_plan_key()
+  # honours this; EXTERNAL installs default False (they subscribe or stay Free). Set explicitly, never by sync.
+  comp = Column(Boolean, default=False, nullable=False)
   orders = relationship('Order', back_populates='store')
   categories = relationship("StoreCategory", secondary=store_category_map, back_populates="stores")
   organization = relationship("Organization", back_populates="stores")
