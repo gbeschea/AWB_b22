@@ -1130,10 +1130,12 @@ export function saveInvoiceSettings(s: Partial<InvoiceSettings>) {
 
 // --- Automation schedule (per store: mode on_order|cron|on_delivered|off + minutes; risk actions) ---
 export interface ScheduleEntry { mode: string; minutes: number; }
+export interface SpecialRule { contains: string; action: string; }
 export interface AutomationSchedule {
   duplicates: ScheduleEntry; parcels: ScheduleEntry; surprise: ScheduleEntry;
-  blocklist: ScheduleEntry; cod_capture: ScheduleEntry; awb: ScheduleEntry;
+  blocklist: ScheduleEntry; special: ScheduleEntry; cod_capture: ScheduleEntry; awb: ScheduleEntry;
   no_hold?: boolean;
+  special_rules?: SpecialRule[];
 }
 export function getAutomationSchedule() {
   return authFetch<AutomationSchedule>(`/api/automation-schedule`);

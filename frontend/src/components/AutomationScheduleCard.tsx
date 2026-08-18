@@ -2,20 +2,24 @@ import { useCallback, useEffect, useState } from "react";
 import {
   BlockStack, Button, Card, Checkbox, InlineGrid, InlineStack, Select, Text, TextField,
 } from "@shopify/polaris";
-import { getAutomationSchedule, saveAutomationSchedule, type AutomationSchedule } from "../lib/api";
+import { getAutomationSchedule, saveAutomationSchedule, type AutomationSchedule, type SpecialRule } from "../lib/api";
 
 function toast(msg: string, isError = false) {
   (window as unknown as { shopify?: { toast: { show: (m: string, o?: { isError: boolean }) => void } } })
     .shopify?.toast.show(msg, isError ? { isError: true } : undefined);
 }
 
-type Key = "duplicates" | "parcels" | "surprise" | "blocklist" | "cod_capture" | "awb";
+type Key = "duplicates" | "parcels" | "surprise" | "blocklist" | "special" | "cod_capture" | "awb";
+const SPECIAL_ACTIONS = [
+  { label: "Hold", value: "hold" }, { label: "Anulare", value: "cancel" }, { label: "Trimite", value: "ship" },
+];
 
 const AUTOMATIONS: { key: Key; label: string; help: string; modes: string[] }[] = [
   { key: "duplicates", label: "Duplicate", help: "Comenzi dublate ale aceluiași client — la nivel de organizație.", modes: ["on_order", "cron", "off"] },
   { key: "parcels", label: "Nr. colete", help: "Câte colete are AWB-ul (memorat pentru AWB).", modes: ["on_order", "cron", "off"] },
   { key: "surprise", label: "Surpriză (parfum)", help: "Doar Esteban / George Talent / Lab Noir / Nubra.", modes: ["on_order", "cron", "off"] },
   { key: "blocklist", label: "Blocklist / serial-refuser", help: "Client blocat manual sau cu ≥2 refuzuri în grup. Pe internațional → anulează; pe RO cu CS → hold.", modes: ["on_order", "cron", "off"] },
+  { key: "special", label: "Reguli speciale", help: "Keyword în tag/notă → acțiune (vezi lista de mai jos).", modes: ["on_order", "cron", "off"] },
   { key: "cod_capture", label: "COD capture", help: "La livrare: marchează plătit / tag refuzat.", modes: ["on_delivered", "cron", "off"] },
   { key: "awb", label: "AWB", help: "Creează eticheta (doar în fereastra AWB).", modes: ["on_order", "cron", "off"] },
 ];
@@ -31,6 +35,8 @@ export function AutomationScheduleCard() {
 
   const setEntry = (key: Key, patch: Partial<{ mode: string; minutes: number }>) =>
     setCfg((c) => (c ? { ...c, [key]: { ...(c[key] as object), ...patch } } : c));
+  const setRules = (fn: (rules: SpecialRule[]) => SpecialRule[]) =>
+    setCfg((c) => (c ? { ...c, special_rules: fn(c.special_rules ?? []) } : c));
 
   const save = useCallback(async () => {
     if (!cfg) return;
@@ -92,6 +98,27 @@ export function AutomationScheduleCard() {
             onChange={(v) => setCfg((c) => (c ? { ...c, no_hold: v } : c))}
             helpText="Pentru magazine fără CS (internaționale): orice hold (risc mediu / duplicat cu sumă diferită) devine trimite; clienții blocați / risc mare / adresă imposibilă → anulare."
           />
+        </BlockStack>
+
+        <BlockStack gap="100">
+          <Text as="h3" variant="headingSm">Reguli speciale</Text>
+          <Text as="p" tone="subdued" variant="bodySm">
+            Dacă tag-ul sau nota comenzii conține un cuvânt → acțiune, PESTE politica implicită. Ex: influencer → hold (chiar și pe internațional). Numele clientului e criptat, deci se caută doar în tag/notă.
+          </Text>
+          {(cfg.special_rules ?? []).map((r, i) => (
+            <InlineGrid key={i} columns={{ xs: 1, sm: 3 }} gap="300">
+              <TextField label="Conține" labelHidden autoComplete="off" placeholder="ex. influencer"
+                value={r.contains}
+                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, contains: v } : x)))} />
+              <Select label="Acțiune" labelHidden options={SPECIAL_ACTIONS} value={r.action}
+                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, action: v } : x)))} />
+              <Button variant="tertiary" tone="critical"
+                onClick={() => setRules((rs) => rs.filter((_, j) => j !== i))}>Șterge</Button>
+            </InlineGrid>
+          ))}
+          <InlineStack>
+            <Button onClick={() => setRules((rs) => [...rs, { contains: "", action: "hold" }])}>+ Adaugă regulă</Button>
+          </InlineStack>
         </BlockStack>
       </BlockStack>
     </Card>

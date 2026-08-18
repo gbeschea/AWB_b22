@@ -129,7 +129,33 @@ async def _blocklist(db, store, order) -> bool:
     return False
 
 
+async def _special(db, store, order) -> bool:
+    """REGULI SPECIALE (merchant): keyword în tags/note → acțiune PESTE politica implicită.
+    Ex. „influencer" → HOLD (chiar și pe internațional unde altfel s-ar trimite). Numele e criptat →
+    match doar pe tags+note. hold → CSQueueItem; cancel/ship → doar log (shadow)."""
+    rules = automation_config.special_rules(store)
+    if not rules:
+        return False
+    blob = " ".join([(order.tags or ""), (order.note or "")]).lower()
+    added = False
+    for r in rules:
+        if r["contains"] and r["contains"] in blob:
+            action = r["action"]
+            logger.info("ORDER-special store=%s order=%s -> would-%s (regula: '%s')",
+                        store.id, order.name, action.upper(), r["contains"])
+            if action == "hold":
+                exists = (await db.execute(
+                    select(models.CSQueueItem.id).where(models.CSQueueItem.order_id == order.id))).first()
+                if not exists:
+                    db.add(models.CSQueueItem(store_id=store.id, order_id=order.id, reason="rule",
+                                              status="open", reason_detail="Regula speciala: " + r["contains"],
+                                              created_by="auto"))
+                    added = True
+    return added
+
+
 _HANDLERS = {
+    "special":    _special,
     "duplicates": _duplicates,
     "parcels":    _parcels,
     "surprise":   _surprise,

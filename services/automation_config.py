@@ -20,14 +20,20 @@ DEFAULT_SCHEDULE: Dict[str, Dict[str, Any]] = {
     "parcels":     {"mode": "on_order",     "minutes": 0},
     "surprise":    {"mode": "on_order",     "minutes": 0},
     "blocklist":   {"mode": "on_order",     "minutes": 0},
+    "special":     {"mode": "on_order",     "minutes": 0},
     "cod_capture": {"mode": "on_delivered", "minutes": 0},
     "awb":         {"mode": "on_order",     "minutes": 5},
 }
 
+# REGULI SPECIALE (merchant): keyword în tags/note → acțiune (hold|cancel|ship), PESTE politica implicită
+# (ex. „influencer" → hold, chiar și pe internațional unde altfel s-ar trimite). Seed: influencer→hold.
+SPECIAL_RULE_DEFAULTS = [{"contains": "influencer", "action": "hold"}]
+VALID_SPECIAL_ACTIONS = {"hold", "cancel", "ship"}
+
 AUTOMATIONS = list(DEFAULT_SCHEDULE.keys())
 # detectoare care rulează per-comandă la ingest (order_shadow) când modul e on_order.
 # „Risc de comandă" = contopit în BLOCKLIST (serial-refuser): ≥N refuzuri în grup → cancel pe intl / hold-CS pe RO.
-ON_ORDER_DETECTORS = ["duplicates", "parcels", "surprise", "blocklist"]
+ON_ORDER_DETECTORS = ["special", "duplicates", "parcels", "surprise", "blocklist"]
 VALID_MODES = {"on_order", "cron", "on_delivered", "off"}
 VALID_ACTIONS = {"none", "hold", "cancel"}
 
@@ -74,6 +80,20 @@ def effective_action(store, action: str) -> str:
     return action
 
 
+def special_rules(store) -> list:
+    """Regulile speciale ale magazinului: listă de {contains, action}. Match pe tags+note (numele e criptat).
+    Default = influencer→hold. Aplicate PESTE politica implicită (ex. hold chiar și pe internațional)."""
+    v = _sched(store).get("special_rules")
+    if isinstance(v, list):
+        out = []
+        for r in v:
+            kw = str((r or {}).get("contains") or "").strip().lower()
+            if kw and (r or {}).get("action") in VALID_SPECIAL_ACTIONS:
+                out.append({"contains": kw, "action": r["action"]})
+        return out
+    return [dict(r) for r in SPECIAL_RULE_DEFAULTS]
+
+
 def merged_schedule(store) -> Dict[str, Any]:
     """Programarea EFECTIVĂ (defaults + override magazin) — pentru API/UI."""
     out: Dict[str, Any] = {k: dict(v) for k, v in DEFAULT_SCHEDULE.items()}
@@ -87,6 +107,7 @@ def merged_schedule(store) -> Dict[str, Any]:
                 except Exception:
                     pass
     out["no_hold"] = close_instead_of_hold(store)
+    out["special_rules"] = special_rules(store)
     return out
 
 
@@ -109,4 +130,12 @@ def sanitize(payload: Dict[str, Any]) -> Dict[str, Any]:
             clean[k] = entry
     if isinstance(payload.get("no_hold"), bool):
         clean["no_hold"] = payload["no_hold"]
+    sr = payload.get("special_rules")
+    if isinstance(sr, list):
+        rules = []
+        for r in sr:
+            kw = str((r or {}).get("contains") or "").strip()
+            if kw and (r or {}).get("action") in VALID_SPECIAL_ACTIONS:
+                rules.append({"contains": kw, "action": r["action"]})
+        clean["special_rules"] = rules      # listă goală = fără reguli speciale (înlocuiește default-ul)
     return clean
