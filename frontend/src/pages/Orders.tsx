@@ -1188,6 +1188,25 @@ export default function Orders() {
       : []),
   ];
 
+  // Intervalul de date se tine LOCAL cat il alegi si se aplica O SINGURA DATA, la final. Cu `onChange`
+  // direct pe filtre, alegerea primei date declansa deja o cerere (si un re-render care inchidea pickerul)
+  // inainte sa apuci sa alegi a doua — exact ce reclama owner-ul.
+  const [dateDraft, setDateDraft] = useState<{ from: string; to: string }>({
+    from: String(filters.date_from ?? ""), to: String(filters.date_to ?? "") });
+  useEffect(() => {
+    setDateDraft({ from: String(filters.date_from ?? ""), to: String(filters.date_to ?? "") });
+  }, [filters.date_from, filters.date_to]);
+  const commitDates = (d: { from: string; to: string }) => {
+    if (d.from === String(filters.date_from ?? "") && d.to === String(filters.date_to ?? "")) return;
+    setFilters((p) => {
+      const n = { ...p };
+      if (d.from) (n as Record<string, unknown>).date_from = d.from; else delete n.date_from;
+      if (d.to) (n as Record<string, unknown>).date_to = d.to; else delete n.date_to;
+      return n;
+    });
+    setPage(1); clearSelection();
+  };
+
   const setFilter = (k: keyof OrderFilters, v: string | number | undefined) => {
     setFilters((p) => {
       const n = { ...p };
@@ -1215,12 +1234,26 @@ export default function Orders() {
     </InlineStack>
   );
   const dateFilter = (
-    <InlineStack gap="200">
-      <TextField label="From" type="date" autoComplete="off"
-        value={String(filters.date_from ?? "")} onChange={(v) => setFilter("date_from", v)} />
-      <TextField label="To" type="date" autoComplete="off"
-        value={String(filters.date_to ?? "")} onChange={(v) => setFilter("date_to", v)} />
-    </InlineStack>
+    <BlockStack gap="200">
+      <InlineStack gap="200">
+        <TextField label={t("date.from")} type="date" autoComplete="off" value={dateDraft.from}
+          onChange={(v) => setDateDraft((d) => ({ ...d, from: v }))}
+          onBlur={() => commitDates(dateDraft)} />
+        <TextField label={t("date.to")} type="date" autoComplete="off" value={dateDraft.to}
+          onChange={(v) => setDateDraft((d) => ({ ...d, to: v }))}
+          onBlur={() => commitDates(dateDraft)} />
+      </InlineStack>
+      <InlineStack gap="200">
+        <Button size="slim" onClick={() => commitDates(dateDraft)}
+          disabled={dateDraft.from === String(filters.date_from ?? "")
+                    && dateDraft.to === String(filters.date_to ?? "")}>{t("date.apply")}</Button>
+        {(dateDraft.from || dateDraft.to) && (
+          <Button size="slim" variant="tertiary"
+            onClick={() => { setDateDraft({ from: "", to: "" }); commitDates({ from: "", to: "" }); }}>
+            {t("date.clear")}</Button>
+        )}
+      </InlineStack>
+    </BlockStack>
   );
   const filterDefs = [
     { key: "payment", label: "Payment", pinned: true, filter: choiceFilter("payment", CH_PAYMENT) },
