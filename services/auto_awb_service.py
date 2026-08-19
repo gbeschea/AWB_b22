@@ -14,7 +14,7 @@ from typing import Any, Dict
 
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 import models
@@ -77,6 +77,8 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
 
     has_awb = select(models.Shipment.id).where(
         models.Shipment.order_id == models.Order.id, models.Shipment.awb.isnot(None))
+    cs_open = select(models.CSQueueItem.id).where(
+        models.CSQueueItem.order_id == models.Order.id, models.CSQueueItem.status != "solved")
     stmt = (
         select(models.Order)
         .options(selectinload(models.Order.line_items), selectinload(models.Order.store),
@@ -90,6 +92,13 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
             # Ghost-AWB / already-shipped guard: never auto-AWB an order Shopify already reports as
             # fulfilled (shipped by another system / a manual label) — that would double-ship.
             models.Order.fulfilled_at.is_(None),
+            # HOLD-URILE SUNT OBLIGATORII, nu decorative: fără ele, tot ce opresc detectoarele (dublură,
+            # client blocat, adresă proastă, regulă specială „influencer") ar primi AWB automat oricum —
+            # exact ce încearcă să prevină. Două surse, ambele necesare: coada CS a OH și hold-ul pus în
+            # Shopify (pe care îl poate pune și un om, sau cronul). (Blocantul #1 din auditul cronului.)
+            ~cs_open.exists(),
+            or_(models.Order.is_on_hold_shopify.is_(None),
+                models.Order.is_on_hold_shopify.is_(False)),
         )
         .order_by(models.Order.created_at.asc())
         .limit(_PER_STORE_CAP)
@@ -97,6 +106,20 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
     orders = (await db.execute(stmt)).scalars().all()
     if not orders:
         return {"eligible": 0}
+
+    # Comenzile pe care le-am ABANDONAT (prea multe eșecuri) sau le-am predat deja la CS nu se mai
+    # reîncearcă: altfel ocupă permanent cota de 25/magazin (ordonată crescător pe dată) și blochează
+    # comenzile noi — starvation tăcut, aceeași clasă ca la polling-ul de status.
+    try:
+        from services import awb_giveup
+        _gave_up = await awb_giveup.gave_up_ids(db, [o.id for o in orders])
+        if _gave_up:
+            orders = [o for o in orders if o.id not in _gave_up]
+            logger.info("auto-awb %s: sar %d comenzi abandonate/la CS", store.domain, len(_gave_up))
+    except Exception as e:
+        logger.info("auto-awb: gave_up_ids indisponibil (%s) — continui fără filtru", e)
+    if not orders:
+        return {"eligible": 0, "skipped_gave_up": True}
 
     # Resolve a profile id → (account_key, options) once per pass.
     resolved: Dict[int, Any] = {}
@@ -142,9 +165,26 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
             await db.commit()
             created.append(r["awb"])
             by_account.setdefault(account_key, []).append(r["awb"])
+            # Contorul de eșecuri se ZEROIZEAZĂ la succes — altfel mecanismul e o capcană cu sens unic:
+            # eșecurile de acum două săptămâni s-ar aduna peste cele de azi și comanda ar fi abandonată
+            # deși de fapt merge. Cablat în ACEEAȘI schimbare cu on_failure (avertismentul review-ului).
+            try:
+                from services import awb_giveup
+                await awb_giveup.reset(db, o)
+            except Exception:
+                pass
         except Exception as e:
             await db.rollback()
             errors.append(str(e))
+            # Decizia completă după un eșec: clasifică (tranzitoriu/permanent/config), incrementează
+            # contorul și, la prag, predă comanda la CS în loc s-o reîncerce la infinit.
+            try:
+                from services import awb_giveup
+                await awb_giveup.on_failure(db, store, o, e)
+                await db.commit()
+            except Exception as ge:
+                await db.rollback()
+                logger.info("auto-awb: giveup a picat pt %s: %s", getattr(o, "name", "?"), ge)
 
     # One pickup request per courier account (an order routed to DPD and another to FAN each get theirs).
     for acct_key, awbs in by_account.items():

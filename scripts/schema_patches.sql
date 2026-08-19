@@ -67,3 +67,8 @@ CREATE INDEX IF NOT EXISTS ix_awb_fail_counts_store ON awb_fail_counts (store_id
 -- când a raportat curierul. Coada se ordonează după ÎNCERCARE, deci nimic nu mai poate flămânzi.
 ALTER TABLE shipments ADD COLUMN IF NOT EXISTS last_poll_at timestamptz;
 CREATE INDEX IF NOT EXISTS ix_shipments_last_poll_at ON shipments (last_poll_at);
+
+-- ⚠️ OWNERSHIP: tabelele create rulând psql CA `postgres` rămân ale lui postgres, iar aplicația (user
+-- `order_hub`) primește „permission denied" — capcană deja plătită o dată cu hub_settings/blocklist.
+-- Orice tabelă nouă are nevoie de linia asta.
+ALTER TABLE awb_fail_counts OWNER TO order_hub;

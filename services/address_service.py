@@ -73,7 +73,9 @@ def apply_aliases(s: str) -> str:
 
 # ================== Patterns ==================
 
-LOCKER = re.compile(r"(easybox|locker|sameday|fanbox|collect\s*point|pick[\s\-]*up)", re.I)
+# „sameday" SCOS: e numele unui CURIER, nu un tip de livrare — orice adresă care îl menționa
+# („livrare prin Sameday") era tratată drept ridicare din locker și rutată greșit.
+LOCKER = re.compile(r"(easybox|locker|fanbox|collect\s*point|pick[\s\-]*up)", re.I)
 HAS_PREFIX_NUM = re.compile(r'(?i)\b(?:nr|no|numar|număr)\.?\s*(\d+[a-zA-Z]?|\d+/\d+)\b')
 TRAILING_NUM   = re.compile(r'(?i)(\d+[a-zA-Z]?|\d+/\d+)\s*($|,|\s+bl|bloc|sc|scara|ap|et)')
 SECTOR_RE = re.compile(r"\b(?:sector(?:ul)?|sec\.?|sect\.)\s*([1-6])\b", re.I)

@@ -172,7 +172,30 @@ class XConnectorCourier(BaseCourier):
             return {"success": False, "message": "comanda nu există (încă) în xConnector"}
         if self._doc(o, "SHIPPING_LABEL"):
             return {"success": False, "message": "are DEJA AWB în xConnector — folosește void + create (regen)"}
-        con = await self._pick_shipping_connector(creds)
+        # Adresa marcată WRONG/UNKNOWN de xConnector = eticheta NU se poate face deloc (verificat live pe
+        # NUBRA13391). Încercăm o reparație CONSERVATOARE înainte să cerem eticheta. Nu e „proactiv": aici
+        # adresa e deja respinsă, deci n-avem ce strica — spre deosebire de sanitizarea intl, care se face
+        # doar DUPĂ ce curierul refuză.
+        if str(o.get("addressStatus") or "").upper() in ("WRONG", "UNKNOWN"):
+            try:
+                from . import address_repair
+                rep = await address_repair.repair_address(self, creds, o, order, apply=True)
+                if rep.get("changed"):
+                    logger.info("repair-address order=%s -> %s", getattr(order, "name", "?"), rep.get("note"))
+                    o = await self.xc_order_by_shopify_id(creds, order.shopify_order_id) or o
+            except Exception as e:
+                logger.info("repair-address a picat pt %s: %s", getattr(order, "name", "?"), e)
+        # RUTARE: dacă clientul a ales pe storefront un punct de ridicare (easybox/locker), coletul TREBUIE
+        # să plece pe connectorul acela — un AWB de livrare la domiciliu peste o comandă de locker înseamnă
+        # colet rutat greșit. Cade pe default-ul magazinului când nu există alegere.
+        con = None
+        try:
+            from . import locker_routing
+            con = await locker_routing.pick_connector(self, creds, order, await self.connectors(creds))
+        except Exception as e:
+            logger.info("locker-routing a picat pt %s: %s", getattr(order, "name", "?"), e)
+        if not con:
+            con = await self._pick_shipping_connector(creds)
         if not con:
             return {"success": False, "message": "niciun connector de curierat activ pe cheia xConnector"}
         # `parcels_count` e cheia CANONICĂ în OH (o setează packing.apply_to_options și auto_awb_service din
