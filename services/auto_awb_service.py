@@ -260,18 +260,30 @@ async def _shopify_gate(store, order) -> Dict[str, Any]:
 
 
 async def run_all() -> Dict[str, Any]:
-    """One pass over every store that has auto-AWB enabled. Own DB session."""
-    total = {"stores": 0, "created": 0, "errors": 0}
+    """O trecere peste fiecare magazin cu auto-AWB pornit. Sesiune proprie.
+
+    Fiecare magazin e izolat: o excepție pe unul (token expirat, xConnector căzut) nu mai poate opri
+    expedierea pe celelalte — altfel un singur magazin bolnav ține tot depozitul pe loc.
+    """
+    total = {"stores": 0, "created": 0, "errors": 0, "blocked": 0}
     async with AsyncSessionLocal() as db:
         stores = (await db.execute(
             select(models.Store).where(models.Store.is_active.is_(True),
                                        models.Store.auto_awb_enabled.is_(True))
         )).scalars().all()
         for s in stores:
-            res = await run_store(db, s)
+            dom = s.domain
+            try:
+                res = await run_store(db, s)
+            except Exception:
+                await db.rollback()
+                logger.exception("auto-awb: magazinul %s a picat — continui cu restul", dom)
+                total["errors"] += 1
+                continue
             total["stores"] += 1
             total["created"] += res.get("created", 0)
             total["errors"] += res.get("errors", 0)
+            total["blocked"] += res.get("blocked_by_shopify", 0)
     return total
 
 
@@ -297,7 +309,10 @@ async def run_forever(interval_sec: int = 300) -> None:
                 if got:
                     try:
                         res = await run_all()
-                        if res.get("created") or res.get("errors"):
+                        # Logăm și când am BLOCAT ceva, nu doar când am creat: o tură tăcută care de fapt
+                        # a sărit 5 comenzi arată identic cu una care n-a avut de lucru — exact confuzia
+                        # care a costat 10 minute la pornirea MagDeal.
+                        if res.get("created") or res.get("errors") or res.get("blocked"):
                             logger.info("auto-awb pass: %s", res)
                     finally:
                         await conn.execute(
