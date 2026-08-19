@@ -131,7 +131,7 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
             resolved[pid] = await _profile_base(db, store, pid)
         return resolved[pid]
 
-    created, errors, no_route, waiting_multi = [], [], 0, 0
+    created, errors, no_route, waiting_multi, blocked = [], [], 0, 0, 0
     by_account: Dict[str, list] = {}
     # Lucrăm pe ID-uri, nu pe instanțele din listă: la primul eșec facem `db.rollback()`, iar rollback-ul
     # EXPIRĂ toate instanțele sesiunii. Următoarea comandă ar arunca MissingGreenlet la simpla citire a unui
@@ -168,13 +168,24 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
             # SAFETY: never auto-ship an order that spans multiple fulfillment LOCATIONS from a
             # single AWB (that would ship everything from one location). Flag it to CS and wait
             # for a human to split it / add a location rule. Fail-soft: a check error still ships.
-            if await _spans_multiple_locations(o.store or store, o):
-                from routes.cs_queue import enqueue_order
-                await enqueue_order(db, store, o, reason="manual",
-                                    detail="Multiple locations — needs a split or a location rule",
-                                    created_by="auto")
-                await db.commit()
-                waiting_multi += 1
+            gate = await _shopify_gate(o.store or store, o)
+            if not gate["ok"]:
+                if gate["multi"]:
+                    from routes.cs_queue import enqueue_order
+                    await enqueue_order(db, store, o, reason="manual",
+                                        detail="Multiple locations — needs a split or a location rule",
+                                        created_by="auto")
+                    await db.commit()
+                    waiting_multi += 1
+                else:
+                    # ON_HOLD / CLOSED / CANCELLED în Shopify: nu e treaba noastră s-o expediem, și nu e
+                    # nici anomalie de raportat la CS — cineva a decis asta deliberat. Reflectăm hold-ul
+                    # local ca UI-ul să nu mai mintă; restul se așază la reconcilierea de fantome.
+                    blocked += 1
+                    if "ON_HOLD" in gate["reason"] and not getattr(o, "is_on_hold_shopify", False):
+                        o.is_on_hold_shopify = True
+                        await db.commit()
+                    logger.info("auto-awb: sar %s — Shopify zice %s", o.name, gate["reason"])
                 continue
             r = await _create_one(db, store, o, account_key, opts)
             await db.commit()
@@ -208,26 +219,44 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
             await _request_pickup(db, _store, acct_key, awbs, {})
         except Exception:
             pass
-    logger.info("auto-awb %s: created=%d errors=%d no-route=%d waiting-multi=%d",
-                store_domain, len(created), len(errors), no_route, waiting_multi)
+    logger.info("auto-awb %s: created=%d errors=%d no-route=%d waiting-multi=%d blocate-de-shopify=%d",
+                store_domain, len(created), len(errors), no_route, waiting_multi, blocked)
     return {"created": len(created), "errors": len(errors), "no_route": no_route,
-            "waiting_multi_location": waiting_multi}
+            "waiting_multi_location": waiting_multi, "blocked_by_shopify": blocked}
 
 
-async def _spans_multiple_locations(store, order) -> bool:
-    """True if the order still has items to ship from 2+ distinct fulfillment locations. Uses
-    the fulfillment-order groups (assignedLocation name only — no read_locations needed).
-    Fail-soft: returns False on any error so a check failure never blocks auto-AWB."""
+async def _shopify_gate(store, order) -> Dict[str, Any]:
+    """ADEVĂRUL DESPRE COMANDĂ, CERUT LUI SHOPIFY ÎN MOMENTUL EXPEDIERII — nu din starea locală.
+
+    Starea locală se învechește tăcut: OH află de hold-uri și închideri din webhook, iar un webhook
+    pierdut nu se recuperează singur. Verificat pe MagDeal înainte de a-l porni: din 8 comenzi pe care
+    OH le credea expediabile, 4 aveau fulfillment-ul ÎNCHIS și 2 erau pe HOLD în Shopify — iar OH le
+    avea pe toate cu `is_on_hold_shopify=false`. Adică poarta de hold, care există tocmai ca să
+    OPREASCĂ expedierea, era oarbă exact la comenzile pe care cineva le pusese deliberat pe hold.
+
+    Un singur apel GraphQL, făcut doar pentru comenzile pe care chiar urmează să le expediem (1-2 pe
+    tură), răspunde la toate trei întrebările: mai e ceva de expediat, e pe hold, sunt mai multe
+    locații. Fail-soft peste tot: o eroare de verificare nu blochează expedierea (altfel o pană la
+    Shopify ar opri tot depozitul).
+    """
+    out: Dict[str, Any] = {"ok": True, "reason": "", "multi": False}
     if not getattr(order, "shopify_order_id", None):
-        return False
+        return out
     try:
         from services import shopify_service
         groups = await shopify_service.get_fulfillment_order_groups(store, order.shopify_order_id)
-        open_locs = {(g.get("location") or "") for g in groups if g.get("open")}
-        return len(open_locs) > 1
     except Exception as e:
-        logger.info("multi-location check failed for %s: %s", getattr(order, "name", "?"), e)
-        return False
+        logger.info("poarta Shopify a picat pt %s: %s — las comanda să meargă", getattr(order, "name", "?"), e)
+        return out
+    if not groups:
+        return out                              # fără date ≠ dovadă că e închisă
+    open_groups = [g for g in groups if g.get("open")]
+    if not open_groups:
+        st = ",".join(sorted({(g.get("status") or "?") for g in groups}))
+        return {"ok": False, "reason": st, "multi": False}
+    if len({(g.get("location") or "") for g in open_groups}) > 1:
+        return {"ok": False, "reason": "multi-location", "multi": True}
+    return out
 
 
 async def run_all() -> Dict[str, Any]:

@@ -26,7 +26,8 @@ from database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
-_MIN_AGE_DAYS = 4          # sub asta e trafic normal: comanda chiar așteaptă AWB
+_MIN_AGE_DAYS = 1          # sub o zi e trafic normal: comanda chiar așteaptă AWB. (Era 4; comenzile
+                           # închise găsite pe MagDeal aveau 1-2 zile, deci pragul le rata complet.)
 _PER_STORE_CAP = 50        # lot mărginit per magazin per trecere
 # BUGET DE TIMP, nu doar de rânduri. Prima versiune avea doar cap per magazin (150) și, cu ~20 de
 # magazine, o trecere putea însemna 3000 de interogări Shopify — peste 20 de minute în care bucla nu
