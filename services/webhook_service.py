@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -35,6 +36,43 @@ logger = logging.getLogger(__name__)
 
 # Background per-order shadow tasks (keep strong refs so they aren't GC'd mid-run).
 _ORDER_SHADOW_TASKS: set = set()
+
+# Un lock PER COMANDĂ: Shopify livrează orders/create + orders/updated + orders/cancelled în paralel
+# pentru aceeași comandă (plus redelivery după 500). Fără serializare, toate văd „nu există" și fac INSERT
+# → UniqueViolation pe ix_orders_shopify_order_id. Reîncercarea singură nu ajunge (a doua încercare poate
+# pierde cursa cu a TREIA livrare). App-ul rulează un singur proces uvicorn (fără --workers), deci un lock
+# în proces le serializează complet. Cheia se șterge când nu mai e nimeni pe ea.
+import asyncio as _asyncio
+
+_ORDER_LOCKS: Dict[str, "_asyncio.Lock"] = {}
+_ORDER_LOCK_USERS: Dict[str, int] = {}
+
+
+class _order_lock:
+    """`async with _order_lock(key):` — serializează handlerele pe aceeași comandă."""
+
+    def __init__(self, key: str):
+        self.key = key
+
+    async def __aenter__(self):
+        lock = _ORDER_LOCKS.get(self.key)
+        if lock is None:
+            lock = _ORDER_LOCKS[self.key] = _asyncio.Lock()
+        _ORDER_LOCK_USERS[self.key] = _ORDER_LOCK_USERS.get(self.key, 0) + 1
+        await lock.acquire()
+        return self
+
+    async def __aexit__(self, *exc):
+        lock = _ORDER_LOCKS.get(self.key)
+        if lock is not None and lock.locked():
+            lock.release()
+        n = _ORDER_LOCK_USERS.get(self.key, 1) - 1
+        if n <= 0:                      # nimeni nu mai așteaptă → nu ținem dicționarul să crească la infinit
+            _ORDER_LOCK_USERS.pop(self.key, None)
+            _ORDER_LOCKS.pop(self.key, None)
+        else:
+            _ORDER_LOCK_USERS[self.key] = n
+        return False
 
 
 # --- small payload helpers -------------------------------------------------
@@ -363,16 +401,35 @@ async def process_webhook_event(
     if not handler:
         logger.warning("No handler for webhook topic=%s (shop store_id=%s).", topic, store_id)
         return
-    async with AsyncSessionLocal() as session:
-        store = await session.get(models.Store, store_id)
-        if not store or not store.is_active:
-            logger.warning("Webhook for missing/inactive store_id=%s; ignored.", store_id)
-            return
-        try:
-            await handler(session, store, payload)
-        except Exception:
-            # RE-RAISE. Swallowing here is what made a failed orders/create vanish: the route had
-            # already returned 200, so Shopify never retried and the order simply never existed.
-            # The caller now returns 500 on this, and Shopify redelivers. Handlers are idempotent.
-            logger.exception("Webhook handler crashed: topic=%s store_id=%s", topic, store_id)
-            raise
+    # CURSĂ pe aceeași comandă: Shopify livrează `orders/create`, `orders/updated` și `orders/cancelled`
+    # în PARALEL (plus redelivery după un 500). Două handlere văd amândouă „comanda nu există", amândouă
+    # fac INSERT, al doilea moare cu UniqueViolation pe ix_orders_shopify_order_id → 500 → Shopify
+    # reîncearcă → și mai multe livrări simultane. Măsurat 19-aug: 37 de eșecuri în 40 min (31 pe comandă,
+    # 6 pe shipments.shopify_fulfillment_id). Handlerul E idempotent, doar că pierde cursa: o REÎNCERCARE
+    # într-o sesiune nouă îl duce pe calea de UPDATE (rândul există deja) și cursa se rezolvă singură.
+    _oid = str((payload or {}).get("id") or (payload or {}).get("order_edit", {}).get("order_id") or "")
+    _key = "%s:%s" % (store_id, _oid)
+    async with _order_lock(_key):
+      for attempt in (1, 2):
+          async with AsyncSessionLocal() as session:
+              store = await session.get(models.Store, store_id)
+              if not store or not store.is_active:
+                  logger.warning("Webhook for missing/inactive store_id=%s; ignored.", store_id)
+                  return
+              try:
+                  await handler(session, store, payload)
+                  return
+              except IntegrityError as e:
+                  await session.rollback()
+                  if attempt == 1 and "duplicate key" in str(e).lower():
+                      logger.info("Webhook race (topic=%s store=%s) — reiau o dată pe calea de UPDATE.",
+                                  topic, store_id)
+                      continue
+                  logger.exception("Webhook handler crashed: topic=%s store_id=%s", topic, store_id)
+                  raise
+              except Exception:
+                  # RE-RAISE. Swallowing here is what made a failed orders/create vanish: the route had
+                  # already returned 200, so Shopify never retried and the order simply never existed.
+                  # The caller now returns 500 on this, and Shopify redelivers. Handlers are idempotent.
+                  logger.exception("Webhook handler crashed: topic=%s store_id=%s", topic, store_id)
+                  raise
