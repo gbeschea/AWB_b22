@@ -143,6 +143,14 @@ async def _special(db, store, order) -> bool:
     rules = automation_config.special_rules(store)
     if not rules:
         return False
+    # O comandă deja PLECATĂ (sau anulată) n-are ce fi oprită. Fără garda asta, orice webhook de
+    # update pe o comandă veche re-evaluează regulile și deschide tichet degeaba — s-a întâmplat pe
+    # MAG26245: comandă din 10 iulie, AWB făcut, marcată expediată, iar în aceeași secundă a primit
+    # tichet „Regulă specială: swap". Regulile opresc expedierea; după ea, nu mai au obiect.
+    if order.cancelled_at or getattr(order, "fulfilled_at", None):
+        return False
+    if any(getattr(sh, "awb", None) for sh in (getattr(order, "shipments", None) or [])):
+        return False
     added = False
     for r in rules:
         if automation_config.special_rule_matches(r, order):
