@@ -51,6 +51,15 @@ class BaseCourier(ABC):
     name: str
     display_name: str
 
+    # CINE împinge fulfillment-ul în Shopify pentru acest curier?
+    #   False (implicit) = curier DIRECT (DPD/Sameday/GLS/…): nimeni altcineva nu fulfill-uiește, deci OH
+    #                      trebuie s-o facă (la creare pe calea split, altfel când coletul pornește).
+    #   True             = platforma curierului fulfill-uiește SINGURĂ comanda în Shopify (xConnector,
+    #                      Frisbo). Dacă OH ar împinge și el, ar ieși fulfillment DUBLU pe aceeași comandă.
+    # Măsurat pe primul AWB creat de OH (GEN17599): xConnector a fulfill-uit în Shopify la 4 secunde după
+    # crearea etichetei, fără ca OH să facă ceva.
+    owns_shopify_fulfillment: bool = False
+
     def __init__(self, http: httpx.AsyncClient) -> None:
         self.http = http
         self.client = http  # compat
@@ -78,7 +87,7 @@ class BaseCourier(ABC):
         (e.g. FAN) require this as a SEPARATE step — the AWB alone isn't collected. Others
         auto-schedule collection from the AWB's pickup date. Default: not needed."""
         return {"supported": False, "requested": False,
-                "message": "Ridicarea e programată automat cu AWB-ul (fără cerere separată)."}
+                "message": "Pickup is scheduled automatically with the AWB (no separate request needed)."}
 
     async def get_credentials(self, db: AsyncSession, account_key: Optional[str]) -> Dict[str, Any]:
         """
@@ -151,7 +160,7 @@ class BaseCourier(ABC):
             if acc and acc.credentials:
                 return acc.credentials
 
-        raise ValueError(f"Nu s-au găsit credențiale pentru contul '{account_key}'")
+        raise ValueError(f"No credentials found for account '{account_key}'")
 
 
 __all__ = ["BaseCourier", "TrackingResponse", "LabelResponse", "VoidResponse"]

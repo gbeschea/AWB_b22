@@ -240,10 +240,21 @@ async def upsert_order_from_webhook(
         fid = str(fid)
         company = f.get("tracking_company")
         ak = await _account_key_from_db(db, company) or _normalize_account_key(company)
-        existing = next((s for s in order.shipments if s.shopify_fulfillment_id == fid), None)
+        # Potrivire DUPĂ AWB, nu doar după fulfillment id: când OH creează eticheta, rândul lui n-are
+        # încă `shopify_fulfillment_id` (Shopify fulfill-uiește câteva secunde mai târziu, prin
+        # xConnector). Fără asta, webhook-ul insera un AL DOILEA rând pentru ACELAȘI colet —
+        # măsurat pe primul AWB creat de OH: 2 shipments pentru un singur AWB, deci număr dublu de
+        # colete în coada de print și în cota lunară de etichete.
+        existing = (next((s for s in order.shipments if s.shopify_fulfillment_id == fid), None)
+                    or next((s for s in order.shipments
+                             if s.awb and number and str(s.awb) == str(number)), None))
         if existing:
             existing.awb = number
             existing.courier = company or existing.courier
+            if not existing.shopify_fulfillment_id:
+                existing.shopify_fulfillment_id = fid      # legăm fulfillment-ul de rândul creat de OH
+            if not existing.fulfillment_created_at:
+                existing.fulfillment_created_at = parse_timestamp(f.get("created_at"))
             if not existing.account_key:
                 existing.account_key = ak
         else:

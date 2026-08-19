@@ -166,8 +166,11 @@ async def _sync_shipment(db: AsyncSession, shipment: models.Shipment) -> str:
 
     action = f"status:{canon}"
 
-    # 1) Fulfill in Shopify once the parcel is actually moving.
-    if canon in _FULFILL_TRIGGER and not shipment.shopify_fulfillment_id:
+    # 1) Fulfill in Shopify once the parcel is actually moving — DOAR pentru curierii direcți.
+    # xConnector/Frisbo fulfill-uiesc singure comanda; dacă am împinge și noi, ar ieși fulfillment DUBLU
+    # (două tracking-uri pe aceeași comandă, clientul primește două emailuri de expediere).
+    if (canon in _FULFILL_TRIGGER and not shipment.shopify_fulfillment_id
+            and not getattr(svc, "owns_shopify_fulfillment", False)):
         try:
             gid = await shopify_service.create_fulfillment_with_tracking(
                 store, order.shopify_order_id,

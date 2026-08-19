@@ -36,6 +36,8 @@ XBASE = "https://xconnector.app"
 class XConnectorCourier(BaseCourier):
     name = "xconnector"
     display_name = "xConnector (punte AWB + facturi)"
+    # xConnector fulfill-uiește SINGUR comanda în Shopify după ce face eticheta — OH nu mai împinge.
+    owns_shopify_fulfillment = True
 
     # ── HTTP primitives ──
     def _headers(self, creds: Dict[str, Any]) -> Dict[str, str]:
@@ -258,7 +260,9 @@ class XConnectorCourier(BaseCourier):
     async def get_label(self, awb: str, creds: dict, paper_size: str = "A6") -> bytes:
         o = await self.xc_order_by_tracking(creds, awb)
         doc = self._doc(o, "SHIPPING_LABEL") or {}
-        url = doc.get("shippingLabelUrl") or doc.get("fileUrl")
+        # Câmpul REAL întors de xConnector e `url` (verificat pe primul AWB creat de OH, GEN17599);
+        # `shippingLabelUrl`/`fileUrl` apar doar în răspunsul de la create-shipping-label.
+        url = doc.get("url") or doc.get("shippingLabelUrl") or doc.get("fileUrl")
         if not url:
             raise RuntimeError("xConnector: eticheta AWB %s nu are URL de PDF" % awb)
         r = await self.http.get(url, headers=self._headers(creds))

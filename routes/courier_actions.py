@@ -427,8 +427,11 @@ async def split_create(
                 order_id=order.id, courier=courier_name, account_key=account_key,
                 awb=str(awb), courier_specific_data=csd, paper_size=(owner.paper_size or "A6"),
             )
-            # Fulfill just THIS location's fulfillment order with its AWB as tracking.
+            # Fulfill just THIS location's fulfillment order with its AWB as tracking — doar dacă
+            # platforma curierului NU o face ea (xConnector/Frisbo fulfill-uiesc singure → dublu).
             try:
+                if getattr(svc, "owns_shopify_fulfillment", False):
+                    raise StopIteration
                 gid = await shopify_service.create_fulfillment_for_fo(
                     owner, g["fo_id"], tracking_number=str(awb),
                     tracking_company=courier_name, tracking_url=_tracking_url(courier_name, str(awb)),
@@ -436,6 +439,9 @@ async def split_create(
                 )
                 if gid:
                     ship.shopify_fulfillment_id = str(gid).split("/")[-1]
+            except StopIteration:
+                logger.info("split fulfill FO %s: %s fulfill-uiește singur în Shopify — nu împing",
+                            g["fo_id"], courier_name)
             except Exception as fe:
                 logger.info("split fulfill FO %s failed: %s", g["fo_id"], fe)
 

@@ -36,6 +36,8 @@ FRISBO_BASE = "https://ingest.apis.store-view.frisbo.dev"
 class FrisboCourier(BaseCourier):
     name = "frisbo"
     display_name = "Frisbo (3PL — AWB generat de depozitul Frisbo)"
+    # Frisbo e 3PL: generează AWB-ul în pipeline-ul lui și fulfill-uiește comanda în Shopify singur.
+    owns_shopify_fulfillment = True
 
     def _headers(self, creds: Dict[str, Any]) -> Dict[str, str]:
         return {"Authorization": "Bearer " + (creds.get("token") or ""), "Content-Type": "application/json"}
