@@ -320,22 +320,14 @@ async def poll_loop(interval_sec: int) -> None:
                         res = await poll()
                         if res["processed"]:
                             logger.info("status-sync pass: %s", res)
-                        # Reconciliere „fantome" ÎNAINTE de auto-AWB, nu după: o comandă anulată în Shopify
-                        # despre care OH n-a aflat arată perfect eligibilă și ar primi AWB. Rar (implicit 6h),
-                        # lot mărginit, fail-soft — nu concurează niciodată cu munca reală.
+                        # Auto-AWB și-a luat bucla proprie (services.auto_awb_service.run_forever,
+                        # implicit 300s): expedierea nu mai depinde de ritmul pollingului de status și
+                        # nici nu mai poate fi înfometată de o măturare lungă.
+                        # Reconcilierea „fantomelor" rămâne aici — e curățenie, are buget de timp propriu.
                         try:
                             await _maybe_reconcile_ghosts()
                         except Exception:
                             logger.exception("ghost-reconcile pass failed")
-                        # Automated AWB creation (opt-in per store; global kill via env).
-                        if os.environ.get("AWB_AUTO_AWB_ENABLED", "1") != "0":
-                            try:
-                                from services import auto_awb_service
-                                ar = await auto_awb_service.run_all()
-                                if ar.get("created"):
-                                    logger.info("auto-awb pass: %s", ar)
-                            except Exception:
-                                logger.exception("auto-awb pass failed")
                     finally:
                         await conn.execute(
                             text("SELECT pg_advisory_unlock(:k)"), {"k": _ADVISORY_LOCK_KEY}

@@ -14,7 +14,7 @@ from typing import Any, Dict
 
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import selectinload
 
 import models
@@ -244,3 +244,35 @@ async def run_all() -> Dict[str, Any]:
             total["created"] += res.get("created", 0)
             total["errors"] += res.get("errors", 0)
     return total
+
+
+# ── bucla proprie ──────────────────────────────────────────────────────────────────────────────
+# Auto-AWB avea nevoie de RITMUL ei, nu de al pollingului de status. În bucla comună (900s) o comandă
+# aștepta delay-ul ei de 5 min PLUS până la 15 min până la următoarea tură — până la 20 de minute,
+# mai lent decât cronul pe care OH îl înlocuiește. Măsurat în producție: GEN17603, 22 de minute
+# neexpediată. Lock propriu, deci cele două bucle nu se mai blochează una pe alta.
+_AWB_LOCK_KEY = 0x4157424C  # "AWBL"
+
+
+async def run_forever(interval_sec: int = 300) -> None:
+    import asyncio
+    from database import engine
+
+    logger.info("auto-awb loop pornit (interval=%ss)", interval_sec)
+    await asyncio.sleep(30)     # lasă pornirea (webhook reconcile, view-uri) să se așeze
+    while True:
+        try:
+            async with engine.connect() as conn:
+                got = (await conn.execute(
+                    text("SELECT pg_try_advisory_lock(:k)"), {"k": _AWB_LOCK_KEY})).scalar()
+                if got:
+                    try:
+                        res = await run_all()
+                        if res.get("created") or res.get("errors"):
+                            logger.info("auto-awb pass: %s", res)
+                    finally:
+                        await conn.execute(
+                            text("SELECT pg_advisory_unlock(:k)"), {"k": _AWB_LOCK_KEY})
+        except Exception:
+            logger.exception("auto-awb loop cycle failed")
+        await asyncio.sleep(interval_sec)

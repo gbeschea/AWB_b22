@@ -15,6 +15,7 @@ deschise — adică 98% din „vechi și neexpediate" erau minciună.
 from __future__ import annotations
 
 import logging
+import time as _time
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -26,7 +27,13 @@ from database import AsyncSessionLocal
 logger = logging.getLogger(__name__)
 
 _MIN_AGE_DAYS = 4          # sub asta e trafic normal: comanda chiar așteaptă AWB
-_PER_STORE_CAP = 150       # lot mărginit per magazin per trecere
+_PER_STORE_CAP = 50        # lot mărginit per magazin per trecere
+# BUGET DE TIMP, nu doar de rânduri. Prima versiune avea doar cap per magazin (150) și, cu ~20 de
+# magazine, o trecere putea însemna 3000 de interogări Shopify — peste 20 de minute în care bucla nu
+# ajungea la auto-AWB. S-a văzut imediat în producție: GEN17603 a stat 22 de minute neexpediată, cu
+# cronul deja retras. Reconcilierea e curățenie; expedierea e treaba pentru care există sistemul.
+_BUDGET_SEC = 90.0
+_TOTAL_CAP = 300           # plafon GLOBAL pe trecere, nu per magazin
 _Q = ('{ order(id: "gid://shopify/Order/%s") { cancelledAt displayFulfillmentStatus '
       'fulfillments(first:5){ id createdAt } } }')
 
@@ -43,6 +50,7 @@ def _dt(v):
 async def run_once() -> Dict[str, Any]:
     from services import shopify_service
     out = {"checked": 0, "cancelled": 0, "fulfilled": 0, "open": 0, "errors": 0}
+    deadline = _time.monotonic() + _BUDGET_SEC
     async with AsyncSessionLocal() as db:
         stores = (await db.execute(select(models.Store).where(
             models.Store.is_active.is_(True),
@@ -50,6 +58,9 @@ async def run_once() -> Dict[str, Any]:
             ~models.Store.domain.like("test-%"),
         ))).scalars().all()
         for st in stores:
+            if _time.monotonic() > deadline or out["checked"] >= _TOTAL_CAP:
+                out["stopped_early"] = True     # restul se ia la trecerea următoare — nu se pierde nimic
+                break
             rows = (await db.execute(text("""
                 select o.id, o.shopify_order_id from orders o
                 left join shipments sh on sh.order_id = o.id
@@ -67,6 +78,9 @@ async def run_once() -> Dict[str, Any]:
                 out["errors"] += len(rows)
                 continue
             for oid, sid in rows:
+                if _time.monotonic() > deadline or out["checked"] >= _TOTAL_CAP:
+                    out["stopped_early"] = True
+                    break
                 out["checked"] += 1
                 try:
                     r = await cl.post("graphql.json", json={"query": _Q % sid})

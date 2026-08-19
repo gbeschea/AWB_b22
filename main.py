@@ -207,6 +207,17 @@ async def on_startup():
         app.state.status_poll_task = asyncio.create_task(status_sync_service.poll_loop(interval))
         logger.info("Status-sync background loop scheduled (interval=%ss).", interval)
 
+    # Auto-AWB pe bucla LUI, mai deasă decât pollingul de status: comanda are de așteptat doar
+    # delay-ul ales de merchant, nu și restul unei ture de 15 minute.
+    if os.environ.get("AWB_AUTO_AWB_ENABLED", "1").strip() != "0":
+        from services import auto_awb_service
+        try:
+            awb_interval = int(os.environ.get("AWB_AUTO_AWB_INTERVAL_SEC", "300"))
+        except ValueError:
+            awb_interval = 300
+        app.state.auto_awb_task = asyncio.create_task(auto_awb_service.run_forever(awb_interval))
+        logger.info("Auto-AWB background loop scheduled (interval=%ss).", awb_interval)
+
     # cron-parity SHADOW (duplicate / COD capture / surpriză / colete) — LOG-ONLY, paritate cu
     # cronul xConnector; nu scrie nimic în Shopify. Activ doar cu CRON_PARITY_SHADOW=1.
     if os.environ.get("CRON_PARITY_SHADOW") == "1":
