@@ -209,9 +209,24 @@ class XConnectorCourier(BaseCourier):
         # să plece pe connectorul acela — un AWB de livrare la domiciliu peste o comandă de locker înseamnă
         # colet rutat greșit. Cade pe default-ul magazinului când nu există alegere.
         con = None
+        # SWAP înaintea lockerului: la un schimb, curierul trebuie să RIDICE produsul vechi, ceea ce la
+        # un easybox nu se poate face deloc. Comenzile de swap le plasează CS cu adresa clientului, deci
+        # connectorul de schimb livrează ȘI ridică; ruta de locker ar livra doar. Dacă totuși pică ambele,
+        # o logăm ca să se vadă — e o combinație pe care cineva trebuie s-o privească.
+        try:
+            from . import swap_routing
+            con = swap_routing.pick_connector(order, await self.connectors(creds))
+        except Exception as e:
+            logger.info("swap-routing a picat pt %s: %s", getattr(order, "name", "?"), e)
         try:
             from . import locker_routing
-            con = await locker_routing.pick_connector(self, creds, order, await self.connectors(creds))
+            lock = await locker_routing.pick_connector(self, creds, order, await self.connectors(creds))
+            if lock and con and lock.get("id") != con.get("id"):
+                logger.info("ATENȚIE %s: comandă de SWAP cu punct de ridicare ales — merge pe swap (%s), "
+                            "nu pe locker (%s); la locker nu se poate ridica produsul vechi",
+                            getattr(order, "name", "?"), con.get("name"), lock.get("name"))
+            elif lock and not con:
+                con = lock
         except Exception as e:
             logger.info("locker-routing a picat pt %s: %s", getattr(order, "name", "?"), e)
         if not con:
