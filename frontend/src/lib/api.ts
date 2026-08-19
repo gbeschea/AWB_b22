@@ -1141,6 +1141,7 @@ export interface AutomationSchedule {
   duplicates: ScheduleEntry; parcels: ScheduleEntry; surprise: ScheduleEntry;
   blocklist: ScheduleEntry; special: ScheduleEntry; cod_capture: ScheduleEntry; awb: ScheduleEntry;
   no_hold?: boolean;
+  fulfill_when?: string;
   special_rules?: SpecialRule[];
 }
 export function getAutomationSchedule() {

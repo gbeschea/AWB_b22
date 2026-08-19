@@ -244,6 +244,25 @@ async def _create_one(
         paper_size=(opts.get("label_size") or owner.paper_size or "A6"),
     )
     db.add(shipment)
+    # Fulfillment în Shopify LA ETICHETĂ, dacă magazinul a ales asta (implicit e la prima scanare a
+    # curierului — vezi automation_config.fulfill_when). Doar pentru curierii DIRECȚI: xConnector/Frisbo
+    # fulfill-uiesc singure, iar dacă am împinge și noi ar ieși dublu.
+    if not getattr(svc, "owns_shopify_fulfillment", False):
+        try:
+            from services import automation_config as _ac
+            if _ac.fulfill_when(owner) == "on_label":
+                gid = await shopify_service.create_fulfillment_with_tracking(
+                    owner, order.shopify_order_id, tracking_number=str(awb),
+                    tracking_company=(acct.courier_type or account_key).upper() or None,
+                    tracking_url=_tracking_url(acct.courier_type or account_key, str(awb)),
+                    notify_customer=bool(getattr(owner, "fulfill_notify_customer", False)),
+                )
+                if gid:
+                    shipment.shopify_fulfillment_id = str(gid).split("/")[-1]
+                    shipment.fulfillment_created_at = __import__("datetime").datetime.now(
+                        __import__("datetime").timezone.utc)
+        except Exception as fe:      # fulfillment-ul nu are voie să anuleze o etichetă deja creată
+            logger.info("fulfill-on-label a picat pt %s: %s", getattr(order, "name", "?"), fe)
     if not order.assigned_courier:
         order.assigned_courier = acct.courier_type or account_key
     order.processing_status = "Procesată"

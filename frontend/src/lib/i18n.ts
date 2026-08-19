@@ -108,6 +108,12 @@ const STR: Record<string, { en?: string; ro: string }> = {
   "nohold.title": { en: "No holds (international)", ro: "Fără hold-uri (internațional)" },
   "nohold.label": { en: "Don't leave orders on hold — try to ship everything; what can't ship → cancel", ro: "Nu lăsa comenzi pe hold — încearcă să trimiți tot; ce nu se poate → anulează" },
   "nohold.help": { en: "For stores without CS (international): any hold (medium risk / different-total duplicate) becomes ship; blocked customers / impossible address → cancel.", ro: "Pentru magazine fără CS (internaționale): orice hold (duplicat cu sumă diferită) devine trimite; clienții blocați / adresă imposibilă → anulare." },
+  "fulfill.title": { en: "Mark as fulfilled in Shopify", ro: "Când apare expediată în Shopify" },
+  "fulfill.on_pickup": { en: "When the courier picks it up (recommended)", ro: "Când o preia curierul (recomandat)" },
+  "fulfill.on_label": { en: "As soon as the label is created", ro: "Imediat ce se face eticheta" },
+  "fulfill.help": {
+    en: "Only for direct couriers (DPD, Sameday, GLS…), where Order Hub pushes the fulfillment. xConnector and Frisbo fulfill the order themselves. Picking 'as soon as the label is created' can notify the customer before the parcel actually leaves.",
+    ro: "Doar la curierii direcți (DPD, Sameday, GLS…), unde Order Hub împinge fulfillment-ul. xConnector și Frisbo fulfill-uiesc singure comanda. Dacă alegi varianta cu eticheta, clientul poate fi notificat înainte ca pachetul să plece efectiv." },
   "rules.title": { en: "Special rules", ro: "Reguli speciale" },
   "rules.desc": { en: "If the order's tag or note contains a keyword → action, OVER the default policy. E.g. influencer → hold (even international). The customer name is encrypted, so only tag/note are searched.", ro: "Dacă tag-ul sau nota comenzii conține un cuvânt → acțiune, PESTE politica implicită. Ex: influencer → hold (chiar și pe internațional). Numele clientului e criptat, deci se caută doar în tag/notă." },
   "rules.contains": { en: "Contains", ro: "Conține" },

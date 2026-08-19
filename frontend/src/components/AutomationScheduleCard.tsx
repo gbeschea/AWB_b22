@@ -102,6 +102,20 @@ export function AutomationScheduleCard() {
         </BlockStack>
 
         <BlockStack gap="100">
+          <Text as="h3" variant="headingSm">{t("fulfill.title")}</Text>
+          <Select
+            label={t("fulfill.title")} labelHidden
+            options={[
+              { label: t("fulfill.on_pickup"), value: "on_pickup" },
+              { label: t("fulfill.on_label"), value: "on_label" },
+            ]}
+            value={cfg.fulfill_when ?? "on_pickup"}
+            onChange={(v) => setCfg((c) => (c ? { ...c, fulfill_when: v } : c))}
+            helpText={t("fulfill.help")}
+          />
+        </BlockStack>
+
+        <BlockStack gap="100">
           <Text as="h3" variant="headingSm">{t("rules.title")}</Text>
           <Text as="p" tone="subdued" variant="bodySm">
             {t("rules.desc")}

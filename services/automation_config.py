@@ -25,6 +25,21 @@ DEFAULT_SCHEDULE: Dict[str, Dict[str, Any]] = {
     "awb":         {"mode": "on_order",     "minutes": 5},
 }
 
+# CÂND apare comanda ca EXPEDIATĂ în Shopify, la curierii DIRECȚI (DPD/Sameday/GLS/…), unde OH e cel
+# care împinge fulfillment-ul. La xConnector/Frisbo nu se aplică: platforma lor fulfill-uiește singură.
+#   on_pickup (implicit) = la prima scanare a curierului. Clientul primește „expediat" când chiar a plecat;
+#                          o etichetă anulată înainte de ridicare nu lasă o comandă fals-expediată.
+#   on_label             = imediat ce se face eticheta. Shopify arată expediat pe loc, dar clientul poate
+#                          fi notificat înainte ca pachetul să plece efectiv.
+FULFILL_WHEN_DEFAULT = "on_pickup"
+VALID_FULFILL_WHEN = {"on_pickup", "on_label"}
+
+
+def fulfill_when(store) -> str:
+    v = (_sched(store).get("fulfill_when") or "").strip().lower()
+    return v if v in VALID_FULFILL_WHEN else FULFILL_WHEN_DEFAULT
+
+
 # REGULI SPECIALE (merchant): keyword în tags/note → acțiune (hold|cancel|ship), PESTE politica implicită
 # (ex. „influencer" → hold, chiar și pe internațional unde altfel s-ar trimite). Seed: influencer→hold.
 SPECIAL_RULE_DEFAULTS = [{"contains": "influencer", "action": "hold"}]
@@ -107,6 +122,7 @@ def merged_schedule(store) -> Dict[str, Any]:
                 except Exception:
                     pass
     out["no_hold"] = close_instead_of_hold(store)
+    out["fulfill_when"] = fulfill_when(store)
     out["special_rules"] = special_rules(store)
     return out
 
@@ -130,6 +146,8 @@ def sanitize(payload: Dict[str, Any]) -> Dict[str, Any]:
             clean[k] = entry
     if isinstance(payload.get("no_hold"), bool):
         clean["no_hold"] = payload["no_hold"]
+    if payload.get("fulfill_when") in VALID_FULFILL_WHEN:
+        clean["fulfill_when"] = payload["fulfill_when"]
     sr = payload.get("special_rules")
     if isinstance(sr, list):
         rules = []
