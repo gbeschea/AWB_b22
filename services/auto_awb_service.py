@@ -106,9 +106,18 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
         .order_by(models.Order.created_at.asc())
         .limit(_PER_STORE_CAP)
     )
+    # Adresele proaste se rutează la CS INDIFERENT dacă avem sau nu comenzi de expediat: altfel un
+    # magazin fără trafic nou le-ar lăsa suspendate la nesfârșit (ieșeam mai jos pe `eligible: 0`).
+    bad_addr = 0
+    try:
+        bad_addr = await _route_bad_addresses(db, store, store_id)
+    except Exception:
+        await db.rollback()
+        logger.exception("rutarea adreselor proaste a picat pe %s", store_domain)
+
     orders = (await db.execute(stmt)).scalars().all()
     if not orders:
-        return {"eligible": 0}
+        return {"eligible": 0, "bad_address_to_cs": bad_addr}
 
     # Comenzile pe care le-am ABANDONAT (prea multe eșecuri) sau le-am predat deja la CS nu se mai
     # reîncearcă: altfel ocupă permanent cota de 25/magazin (ordonată crescător pe dată) și blochează
@@ -122,7 +131,7 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
     except Exception as e:
         logger.info("auto-awb: gave_up_ids indisponibil (%s) — continui fără filtru", e)
     if not orders:
-        return {"eligible": 0, "skipped_gave_up": True}
+        return {"eligible": 0, "skipped_gave_up": True, "bad_address_to_cs": bad_addr}
 
     # Resolve a profile id → (account_key, options) once per pass.
     resolved: Dict[int, Any] = {}
@@ -222,7 +231,8 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
     logger.info("auto-awb %s: created=%d errors=%d no-route=%d waiting-multi=%d blocate-de-shopify=%d",
                 store_domain, len(created), len(errors), no_route, waiting_multi, blocked)
     return {"created": len(created), "errors": len(errors), "no_route": no_route,
-            "waiting_multi_location": waiting_multi, "blocked_by_shopify": blocked}
+            "waiting_multi_location": waiting_multi, "blocked_by_shopify": blocked,
+            "bad_address_to_cs": bad_addr}
 
 
 async def _shopify_gate(store, order) -> Dict[str, Any]:
@@ -259,6 +269,56 @@ async def _shopify_gate(store, order) -> Dict[str, Any]:
     return out
 
 
+_BAD_ADDR_GRACE_MIN = 20   # răgaz ca validatorul (și eventuala corecție) să-și facă treaba
+
+
+async def _route_bad_addresses(db, store, store_id: int) -> int:
+    """Adresele rămase INVALIDE ajung la CS — altfel comanda nu merge nicăieri.
+
+    Auto-AWB cere adresă validă, și pe bună dreptate. Dar nimic nu ducea mai departe comenzile pe care
+    validatorul le respinge: `/cs-queue/scan` (care face exact asta) e un endpoint MANUAL, pe care nu-l
+    cheamă nimeni. Cât timp rula cronul nu se vedea — el trata adresele grele („corectabile via-HERE +
+    grele→CS"). După retragerea lui, o adresă invalidă rămâne pur și simplu suspendată: fără AWB, fără
+    tichet, fără nimeni care să știe de ea. Găsit pe MAG32997, la 59 de minute de la comandă.
+
+    Nu trimite emailuri: `enqueue_order` trimite doar dacă merchantul are un șablon activ cu
+    `auto_on='wrong_address'` — verificat, nu există niciunul pe niciun magazin. Pune însă comanda pe
+    HOLD în Shopify (auto_hold implicit), ceea ce e exact ce vrei la o adresă proastă.
+    """
+    from routes.cs_queue import enqueue_order
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=_BAD_ADDR_GRACE_MIN)
+    rows = (await db.execute(
+        select(models.Order.id).where(
+            models.Order.store_id == store_id,
+            models.Order.cancelled_at.is_(None),
+            models.Order.fulfilled_at.is_(None),
+            models.Order.created_at <= cutoff,
+            models.Order.address_status.isnot(None),
+            ~models.Order.address_status.in_(_VALID_ADDR),
+            ~select(models.Shipment.id).where(
+                models.Shipment.order_id == models.Order.id,
+                models.Shipment.awb.isnot(None)).exists(),
+            ~select(models.CSQueueItem.id).where(
+                models.CSQueueItem.order_id == models.Order.id).exists(),
+        ).order_by(models.Order.created_at.asc()).limit(25)
+    )).scalars().all()
+    n = 0
+    for oid in rows:
+        o = await db.get(models.Order, oid)
+        if o is None:
+            continue
+        try:
+            await enqueue_order(db, store, o, reason="wrong_address",
+                                detail=(o.address_status or "nevalidat"), created_by="auto")
+            await db.commit()
+            n += 1
+        except Exception:
+            await db.rollback()
+            logger.info("rutare-adresa: n-am putut trimite %s la CS", getattr(o, "name", oid))
+    if n:
+        logger.info("auto-awb %s: %d comenzi cu adresa proastă trimise la CS", store.domain, n)
+    return n
+
 async def run_all() -> Dict[str, Any]:
     """O trecere peste fiecare magazin cu auto-AWB pornit. Sesiune proprie.
 
@@ -284,6 +344,7 @@ async def run_all() -> Dict[str, Any]:
             total["created"] += res.get("created", 0)
             total["errors"] += res.get("errors", 0)
             total["blocked"] += res.get("blocked_by_shopify", 0)
+            total["bad_addr_cs"] = total.get("bad_addr_cs", 0) + res.get("bad_address_to_cs", 0)
     return total
 
 
@@ -312,7 +373,8 @@ async def run_forever(interval_sec: int = 300) -> None:
                         # Logăm și când am BLOCAT ceva, nu doar când am creat: o tură tăcută care de fapt
                         # a sărit 5 comenzi arată identic cu una care n-a avut de lucru — exact confuzia
                         # care a costat 10 minute la pornirea MagDeal.
-                        if res.get("created") or res.get("errors") or res.get("blocked"):
+                        if (res.get("created") or res.get("errors") or res.get("blocked")
+                                or res.get("bad_addr_cs")):
                             logger.info("auto-awb pass: %s", res)
                     finally:
                         await conn.execute(
