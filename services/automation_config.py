@@ -40,18 +40,13 @@ def fulfill_when(store) -> str:
     return v if v in VALID_FULFILL_WHEN else FULFILL_WHEN_DEFAULT
 
 
-# REGULI SPECIALE (merchant): keyword în tags/note → acțiune (hold|cancel|ship), PESTE politica implicită
-# (ex. „influencer" → hold, chiar și pe internațional unde altfel s-ar trimite).
+# REGULI SPECIALE (merchant): keyword în tags/note → acțiune (hold|cancel|ship), PESTE politica
+# implicită (ex. „influencer" → hold, chiar și pe internațional unde altfel s-ar trimite).
+# `whole=True` = potrivire pe TAG ÎNTREG. „influencer" trebuie să prindă și „influenceri", deci
+# implicit e subșir; „swap" e un tag exact, deci se compară ca atare.
 #
-# `whole=True` = potrivire pe TAG ÎNTREG, nu pe subșir. Există pentru că cele două reguli implicite au
-# nevoi opuse și amândouă sunt corecte:
-#   • „influencer" trebuie să prindă și tag-ul „influenceri" → subșir (implicit).
-#   • „swap" NU are voie să prindă „swap_request_bi", un flag de BI pus pe ~60 de comenzi în 90 de zile
-#     care n-au nicio legătură cu un schimb. Pe subșir, regula ar pune pe hold toate acele comenzi.
-#
-# swap → HOLD, nu expediere: un schimb (livrezi noul produs, ridici pe cel vechi) NU se poate face prin
-# xConnector, deci orice AWB automat pe o comandă de swap ar fi o livrare simplă — coletul pleacă,
-# produsul vechi rămâne la client, iar operațiunea trebuie refăcută manual. Îl oprim și îl dăm la om.
+# swap → HOLD: un schimb nu se poate face prin xConnector. Un AWB automat ar fi o livrare simplă —
+# coletul pleacă, produsul vechi rămâne la client, iar operațiunea se reface manual. Îl dăm la om.
 SPECIAL_RULE_DEFAULTS = [
     {"contains": "influencer", "action": "hold"},
     {"contains": "swap", "action": "hold", "whole": True},
@@ -176,8 +171,8 @@ def sanitize(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def special_rule_matches(rule: Dict[str, Any], order) -> bool:
     """True dacă regula se potrivește comenzii. `whole=True` compară TAG-URI ÎNTREGI (separate pe
-    virgulă) — singurul mod în care „swap" nu înghite „swap_request_bi". Altfel, subșir în tags+note,
-    ca să prindă și formele flexionate („influencer" în „influenceri")."""
+    virgulă); altfel subșir în tags+note, ca să prindă și formele flexionate („influencer" în
+    „influenceri")."""
     kw = (rule.get("contains") or "").strip().lower()
     if not kw:
         return False
