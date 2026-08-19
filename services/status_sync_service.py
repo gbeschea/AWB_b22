@@ -328,6 +328,13 @@ async def poll_loop(interval_sec: int) -> None:
                             await _maybe_reconcile_ghosts()
                         except Exception:
                             logger.exception("ghost-reconcile pass failed")
+                        # Tichetele automate de pe comenzi deja plecate n-au obiect — curățate aici,
+                        # pe toate magazinele, nu doar pe cele cu auto-AWB.
+                        try:
+                            from services import cs_queue_janitor
+                            await cs_queue_janitor.close_moot_items()
+                        except Exception:
+                            logger.exception("cs-janitor pass failed")
                     finally:
                         await conn.execute(
                             text("SELECT pg_advisory_unlock(:k)"), {"k": _ADVISORY_LOCK_KEY}
