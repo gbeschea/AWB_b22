@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time as _time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -284,6 +285,24 @@ async def _try_advisory_lock() -> bool:
         return bool(got)
 
 
+_GHOST_EVERY_SEC = float(os.environ.get("GHOST_RECONCILE_INTERVAL_SEC", str(6 * 3600)))
+_ghost_next_at = 0.0
+
+
+async def _maybe_reconcile_ghosts() -> None:
+    """Rulează reconcilierea fantomelor cel mult o dată la `_GHOST_EVERY_SEC`. Prima trecere se face
+    la scurt timp după pornire (contorul începe de la 0) ca un restart să nu amâne recuperarea cu 6h."""
+    global _ghost_next_at
+    now = _time.monotonic()
+    if now < _ghost_next_at:
+        return
+    _ghost_next_at = now + _GHOST_EVERY_SEC     # setat ÎNAINTE de lucru: un eșec nu declanșează o buclă strânsă
+    from services import ghost_reconcile
+    res = await ghost_reconcile.run_once()
+    if res.get("cancelled") or res.get("fulfilled"):
+        logger.info("ghost-reconcile: %s", res)
+
+
 async def poll_loop(interval_sec: int) -> None:
     """Forever: every `interval_sec`, if we win the advisory lock, run one polling pass.
     Started as an asyncio task at app startup. Survives per-cycle errors."""
@@ -301,6 +320,13 @@ async def poll_loop(interval_sec: int) -> None:
                         res = await poll()
                         if res["processed"]:
                             logger.info("status-sync pass: %s", res)
+                        # Reconciliere „fantome" ÎNAINTE de auto-AWB, nu după: o comandă anulată în Shopify
+                        # despre care OH n-a aflat arată perfect eligibilă și ar primi AWB. Rar (implicit 6h),
+                        # lot mărginit, fail-soft — nu concurează niciodată cu munca reală.
+                        try:
+                            await _maybe_reconcile_ghosts()
+                        except Exception:
+                            logger.exception("ghost-reconcile pass failed")
                         # Automated AWB creation (opt-in per store; global kill via env).
                         if os.environ.get("AWB_AUTO_AWB_ENABLED", "1") != "0":
                             try:
