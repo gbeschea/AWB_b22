@@ -22,7 +22,7 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional, Tuple, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from collections import Counter
 from difflib import SequenceMatcher
 
@@ -421,6 +421,75 @@ def _set_order_fields(order: Any, status: str, score: int, errors: List[str], su
         suggestions = list(suggestions or []) + [f"validator_version={__VALIDATOR_VERSION__}"]
         setattr(order, "address_suggestions", suggestions)
 
+# ── FLIP (2026-08-19): validatorul CONSOLIDAT (services.nomenclator.runner) e AUTORITAR ──
+# Dovada: 12.133 comenzi în shadow 24h — NOU recuperează 902/1.016 invalizi ai lui B (89%: 624 corectate,
+# 278 valide) cu ZERO regresii (nicio comandă valid→cs/invalid). B (RO-only, v8.3.1) marca TOT internaționalul
+# invalid. Rollback = `ADDR_VALIDATOR=b` în env + recreate (nu cere redeploy de cod).
+_RUNNER_VERDICT = {
+    #  runner status  → (address_status, score)
+    "valid":          ("valid",   100),
+    "corrected":      ("valid",    95),   # corecția e propusă, nu scrisă în Shopify (write-back = pas separat)
+    "needs_geocoder": ("invalid",  50),   # nomenclator+HERE n-au putut decide → om
+    "cs":             ("invalid",  40),
+}
+
+
+def _authoritative() -> str:
+    import os as _os
+    return (_os.environ.get("ADDR_VALIDATOR") or "runner").strip().lower()
+
+
+async def _run_new_validator(order: Any) -> Optional[Dict[str, Any]]:
+    """Rulează validatorul consolidat. Întoarce dict-ul {status,address,source,note} sau None dacă pică
+    (fail-safe: apelantul cade înapoi pe B, ca înainte de flip)."""
+    try:
+        from services.nomenclator import runner as _runner
+        return await _runner.validate_address({
+            "country":  getattr(order, "shipping_country", None) or "",
+            "province": getattr(order, "shipping_province", None) or "",
+            "city":     getattr(order, "shipping_city", None) or "",
+            "zip":      getattr(order, "shipping_zip", None) or "",
+            "address1": getattr(order, "shipping_address1", None) or "",
+            "address2": getattr(order, "shipping_address2", None) or "",
+        })
+    except Exception as e:
+        try:
+            import logging as _logging
+            _logging.getLogger("addr_shadow").warning(
+                "NEW-ERR order=%s: %s", getattr(order, "name", getattr(order, "id", "?")), e)
+        except Exception:
+            pass
+        return None
+
+
+def _emit_from_runner(order: Any, r: Dict[str, Any], b_is_valid: bool,
+                      b_suggestions: List[str]) -> ValidationResult:
+    """Scrie verdictul validatorului NOU pe comandă + loghează dezacordul cu B (diff invers, același
+    logger `addr_shadow` → colectorul de pe box continuă să adune fără schimbări)."""
+    import logging as _logging
+    status_new = (r.get("status") or "cs").lower()
+    mapped, score = _RUNNER_VERDICT.get(status_new, ("invalid", 40))
+    note = (r.get("note") or "")[:200]
+    corr = r.get("address")
+
+    errors: List[str] = [] if mapped == "valid" else [note or f"Address needs review ({status_new})."]
+    suggestions: List[str] = list(b_suggestions or [])
+    if status_new == "corrected" and isinstance(corr, dict):
+        pretty = ", ".join(str(v) for v in (corr.get("address1"), corr.get("city"),
+                                            corr.get("province"), corr.get("zip")) if v)
+        suggestions.append(f"Validator correction: {pretty}" if pretty else "Validator proposed a correction.")
+    if note:
+        suggestions.append(f"validator_note={note}")
+
+    _set_order_fields(order, mapped, score, errors, suggestions)
+    if (mapped == "valid") != b_is_valid:      # doar dezacordurile — nu inundăm logul
+        _logging.getLogger("addr_shadow").info(
+            "AUTH order=%s B=%s NEW=%s corr=%s note=%s",
+            getattr(order, "name", getattr(order, "id", "?")),
+            "valid" if b_is_valid else "invalid", status_new, corr, note[:120])
+    return ValidationResult(mapped == "valid", score, errors, suggestions)
+
+
 async def _shadow_validate(order: Any, b_is_valid: bool) -> None:
     """SHADOW (Faza 3): rulează validatorul NOU consolidat (services.nomenclator.runner = A + guard omonimie)
     în PARALEL cu B, DOAR log — fail-safe (orice eroare e înghițită), NU atinge rezultatul live. Activ doar cu
@@ -532,8 +601,14 @@ async def validate_address_for_order(db: AsyncSession, order: Any) -> Validation
         if not _rows_for_street(zip_rows, chosen_street):
             suggestions.append("Check the street name — no match found for the city in that postal code.")
 
-    # SHADOW: rulează validatorul consolidat în paralel (log-only, fail-safe) — B rămâne autoritar.
-    await _shadow_validate(order, not errors)
+    # Validatorul CONSOLIDAT (runner) e AUTORITAR de la 19-aug; B rămâne plasă de siguranță (dacă runner-ul
+    # pică sau ADDR_VALIDATOR=b, verdictul lui B se emite mai jos, exact ca înainte de flip).
+    if _authoritative() == "runner":
+        _new = await _run_new_validator(order)
+        if _new is not None:
+            return _emit_from_runner(order, _new, not errors, suggestions)
+    else:
+        await _shadow_validate(order, not errors)   # modul vechi: B autoritar, NOU în umbră
 
     # Emitere rezultat
     if errors:
