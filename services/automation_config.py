@@ -41,8 +41,21 @@ def fulfill_when(store) -> str:
 
 
 # REGULI SPECIALE (merchant): keyword în tags/note → acțiune (hold|cancel|ship), PESTE politica implicită
-# (ex. „influencer" → hold, chiar și pe internațional unde altfel s-ar trimite). Seed: influencer→hold.
-SPECIAL_RULE_DEFAULTS = [{"contains": "influencer", "action": "hold"}]
+# (ex. „influencer" → hold, chiar și pe internațional unde altfel s-ar trimite).
+#
+# `whole=True` = potrivire pe TAG ÎNTREG, nu pe subșir. Există pentru că cele două reguli implicite au
+# nevoi opuse și amândouă sunt corecte:
+#   • „influencer" trebuie să prindă și tag-ul „influenceri" → subșir (implicit).
+#   • „swap" NU are voie să prindă „swap_request_bi", un flag de BI pus pe ~60 de comenzi în 90 de zile
+#     care n-au nicio legătură cu un schimb. Pe subșir, regula ar pune pe hold toate acele comenzi.
+#
+# swap → HOLD, nu expediere: un schimb (livrezi noul produs, ridici pe cel vechi) NU se poate face prin
+# xConnector, deci orice AWB automat pe o comandă de swap ar fi o livrare simplă — coletul pleacă,
+# produsul vechi rămâne la client, iar operațiunea trebuie refăcută manual. Îl oprim și îl dăm la om.
+SPECIAL_RULE_DEFAULTS = [
+    {"contains": "influencer", "action": "hold"},
+    {"contains": "swap", "action": "hold", "whole": True},
+]
 VALID_SPECIAL_ACTIONS = {"hold", "cancel", "ship"}
 
 AUTOMATIONS = list(DEFAULT_SCHEDULE.keys())
@@ -104,7 +117,8 @@ def special_rules(store) -> list:
         for r in v:
             kw = str((r or {}).get("contains") or "").strip().lower()
             if kw and (r or {}).get("action") in VALID_SPECIAL_ACTIONS:
-                out.append({"contains": kw, "action": r["action"]})
+                out.append({"contains": kw, "action": r["action"],
+                            "whole": bool((r or {}).get("whole"))})
         return out
     return [dict(r) for r in SPECIAL_RULE_DEFAULTS]
 
@@ -154,6 +168,20 @@ def sanitize(payload: Dict[str, Any]) -> Dict[str, Any]:
         for r in sr:
             kw = str((r or {}).get("contains") or "").strip()
             if kw and (r or {}).get("action") in VALID_SPECIAL_ACTIONS:
-                rules.append({"contains": kw, "action": r["action"]})
+                rules.append({"contains": kw, "action": r["action"],
+                              "whole": bool((r or {}).get("whole"))})
         clean["special_rules"] = rules      # listă goală = fără reguli speciale (înlocuiește default-ul)
     return clean
+
+
+def special_rule_matches(rule: Dict[str, Any], order) -> bool:
+    """True dacă regula se potrivește comenzii. `whole=True` compară TAG-URI ÎNTREGI (separate pe
+    virgulă) — singurul mod în care „swap" nu înghite „swap_request_bi". Altfel, subșir în tags+note,
+    ca să prindă și formele flexionate („influencer" în „influenceri")."""
+    kw = (rule.get("contains") or "").strip().lower()
+    if not kw:
+        return False
+    tags = (getattr(order, "tags", "") or "")
+    if rule.get("whole"):
+        return any(t.strip().lower() == kw for t in tags.split(","))
+    return kw in (tags + " " + (getattr(order, "note", "") or "")).lower()

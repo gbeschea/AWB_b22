@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from zoneinfo import ZoneInfo
 
@@ -140,7 +140,7 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
             resolved[pid] = await _profile_base(db, store, pid)
         return resolved[pid]
 
-    created, errors, no_route, waiting_multi, blocked = [], [], 0, 0, 0
+    created, errors, no_route, waiting_multi, blocked, held_by_rule = [], [], 0, 0, 0, 0
     by_account: Dict[str, list] = {}
     # Lucrăm pe ID-uri, nu pe instanțele din listă: la primul eșec facem `db.rollback()`, iar rollback-ul
     # EXPIRĂ toate instanțele sesiunii. Următoarea comandă ar arunca MissingGreenlet la simpla citire a unui
@@ -177,6 +177,12 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
             # SAFETY: never auto-ship an order that spans multiple fulfillment LOCATIONS from a
             # single AWB (that would ship everything from one location). Flag it to CS and wait
             # for a human to split it / add a location rule. Fail-soft: a check error still ships.
+            stopper = await _apply_special_rules(db, store, o)
+            if stopper:
+                logger.info("auto-awb: opresc %s — regulă specială '%s' (merge la om)", o.name, stopper)
+                held_by_rule += 1
+                continue
+
             gate = await _shopify_gate(o.store or store, o)
             if not gate["ok"]:
                 if gate["multi"]:
@@ -232,7 +238,7 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
                 store_domain, len(created), len(errors), no_route, waiting_multi, blocked)
     return {"created": len(created), "errors": len(errors), "no_route": no_route,
             "waiting_multi_location": waiting_multi, "blocked_by_shopify": blocked,
-            "bad_address_to_cs": bad_addr}
+            "bad_address_to_cs": bad_addr, "held_by_rule": held_by_rule}
 
 
 async def _shopify_gate(store, order) -> Dict[str, Any]:
@@ -271,6 +277,33 @@ async def _shopify_gate(store, order) -> Dict[str, Any]:
 
 _BAD_ADDR_GRACE_MIN = 20   # răgaz ca validatorul (și eventuala corecție) să-și facă treaba
 
+
+async def _apply_special_rules(db, store, order) -> Optional[str]:
+    """Regulile speciale ale merchantului, aplicate pe CALEA DE EXPEDIERE, nu doar la ingest.
+
+    `order_shadow` le evaluează când intră comanda, dar depinde de un mod (`on_order`) și de un flag
+    de mediu. Aici e ultimul punct înainte de a face eticheta, deci aici trebuie să fie decisiv:
+    o comandă marcată `swap` sau `influencer` nu are voie să plece automat, indiferent ce s-a
+    întâmplat la ingest.
+
+    Întoarce keyword-ul regulii care a oprit comanda, sau None dacă poate pleca.
+    """
+    from services import automation_config as _ac
+    from routes.cs_queue import enqueue_order
+    for r in _ac.special_rules(store):
+        if r.get("action") != "hold" or not _ac.special_rule_matches(r, order):
+            continue
+        if _ac.effective_action(store, "hold") != "hold":
+            return None          # magazin fără CS: politica „trimitem tot" bate regula
+        try:
+            await enqueue_order(db, store, order, reason="rule",
+                                detail="Regulă specială: " + r["contains"], created_by="auto")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.info("regula-speciala: n-am putut opri %s", getattr(order, "name", "?"))
+        return r["contains"]
+    return None
 
 async def _route_bad_addresses(db, store, store_id: int) -> int:
     """Adresele rămase INVALIDE ajung la CS — altfel comanda nu merge nicăieri.
@@ -357,6 +390,7 @@ async def run_all() -> Dict[str, Any]:
             total["errors"] += res.get("errors", 0)
             total["blocked"] += res.get("blocked_by_shopify", 0)
             total["bad_addr_cs"] = total.get("bad_addr_cs", 0) + res.get("bad_address_to_cs", 0)
+            total["held_by_rule"] = total.get("held_by_rule", 0) + res.get("held_by_rule", 0)
     return total
 
 
@@ -386,7 +420,7 @@ async def run_forever(interval_sec: int = 300) -> None:
                         # a sărit 5 comenzi arată identic cu una care n-a avut de lucru — exact confuzia
                         # care a costat 10 minute la pornirea MagDeal.
                         if (res.get("created") or res.get("errors") or res.get("blocked")
-                                or res.get("bad_addr_cs")):
+                                or res.get("bad_addr_cs") or res.get("held_by_rule")):
                             logger.info("auto-awb pass: %s", res)
                     finally:
                         await conn.execute(

@@ -143,10 +143,9 @@ async def _special(db, store, order) -> bool:
     rules = automation_config.special_rules(store)
     if not rules:
         return False
-    blob = " ".join([(order.tags or ""), (order.note or "")]).lower()
     added = False
     for r in rules:
-        if r["contains"] and r["contains"] in blob:
+        if automation_config.special_rule_matches(r, order):
             action = r["action"]
             logger.info("ORDER-special store=%s order=%s -> would-%s (regula: '%s')",
                         store.id, order.name, action.upper(), r["contains"])
