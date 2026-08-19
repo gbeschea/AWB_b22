@@ -90,7 +90,12 @@ class XConnectorCourier(BaseCourier):
         ad = dict(o.get("shippingAddress") or {})
         if not oid or not ad or not corr:
             return False
-        for k in ("city", "zip", "address1", "address2", "firstName", "lastName", "phone"):
+        # `province`/`country` sunt în listă pentru corecțiile RO (address_repair): judeţul greşit e una
+        # dintre cele mai frecvente cauze de addressStatus=WRONG, iar dacă nu-l scriem aici corecţia
+        # pleacă mutilată (zip nou + judeţ vechi = adresă inconsistentă, tot respinsă). Pentru INTL
+        # (dpd_intl) cheile astea nu apar niciodată în `corr`, deci comportamentul rămâne neschimbat.
+        for k in ("city", "zip", "address1", "address2", "province", "country",
+                  "firstName", "lastName", "phone"):
             if corr.get(k) is not None:
                 ad[k] = corr[k]
         ad["zip"] = dpd_intl.canonical_zip(cc, ad.get("zip"))   # CZ/SK: PSČ „NNN NN" (punct unic)
@@ -167,15 +172,6 @@ class XConnectorCourier(BaseCourier):
             return {"success": False, "message": "comanda nu există (încă) în xConnector"}
         if self._doc(o, "SHIPPING_LABEL"):
             return {"success": False, "message": "are DEJA AWB în xConnector — folosește void + create (regen)"}
-        # INTL: adresa e validă dar DPD o respinge pe FORMAT (35 car, nume ≥2 cuvinte, telefon, PSČ).
-        # Sanitizăm ÎNAINTE de a cere eticheta (paritate cu cronul) — o singură dată per comandă.
-        country = (getattr(order, "shipping_country", None) or "")
-        if country and not (opts.get("skip_intl_sanitize")):
-            try:
-                if await self.sanitize_intl(creds, o, country):
-                    o = await self.xc_order_by_shopify_id(creds, order.shopify_order_id) or o
-            except Exception as e:
-                logger.info("INTL-sanitize a picat pt %s: %s", getattr(order, "name", "?"), e)
         con = await self._pick_shipping_connector(creds)
         if not con:
             return {"success": False, "message": "niciun connector de curierat activ pe cheia xConnector"}
@@ -192,6 +188,27 @@ class XConnectorCourier(BaseCourier):
         ok = s == 200 and isinstance(d, dict) and d.get("accepted")
         labels = (d.get("shippingLabels") or []) if isinstance(d, dict) else []
         good = [L for L in labels if L.get("success")]
+
+        # INTL: sanitizare REACTIVĂ — DOAR după ce curierul a respins eticheta, apoi o singură reîncercare.
+        # NU proactiv: o corecție AI scrisă pe o comandă care oricum ar fi plecat schimbă adresa clientului
+        # degeaba și (lecția cronului) marchează comanda ca AI_CORRECTION, ceea ce face WPO/DPD să ceară
+        # emailul OBLIGATORIU — fără pasul de email (neportat încă) ar bloca permanent comenzi CZ/PL care
+        # mergeau. Cronul cheamă sanitizerul exact aici, pe eroarea primită, cu marker pe (comandă|motiv).
+        country = (getattr(order, "shipping_country", None) or "")
+        if not (ok and good) and country and not opts.get("_intl_retried"):
+            try:
+                if await self.sanitize_intl(creds, o, country):
+                    o2 = await self.xc_order_by_shopify_id(creds, order.shopify_order_id) or o
+                    body["orderId"] = o2.get("orderId", body["orderId"])
+                    s, d = await self._post(creds, "/api/actions/create-shipping-label", body)
+                    ok = s == 200 and isinstance(d, dict) and d.get("accepted")
+                    labels = (d.get("shippingLabels") or []) if isinstance(d, dict) else []
+                    good = [L for L in labels if L.get("success")]
+                    logger.info("INTL-retry order=%s -> %s", getattr(order, "name", "?"),
+                                "OK" if (ok and good) else "tot respins")
+            except Exception as e:
+                logger.info("INTL-sanitize a picat pt %s: %s", getattr(order, "name", "?"), e)
+
         if not (ok and good):
             msg = self._err(d) or (good and good[0].get("errorMessage")) or "respins"
             return {"success": False, "message": msg, "raw": d}
