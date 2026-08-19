@@ -304,7 +304,14 @@ async def _route_bad_addresses(db, store, store_id: int) -> int:
     )).scalars().all()
     n = 0
     for oid in rows:
-        o = await db.get(models.Order, oid)
+        # `enqueue_order` citește `order.shipments` (ca să nu pună hold pe o comandă deja plecată).
+        # E o relație LENEȘĂ: cu `db.get` simplu, prima atingere încearcă un SELECT sincron în context
+        # async și aruncă MissingGreenlet — deci încărcăm explicit ce va atinge.
+        o = (await db.execute(
+            select(models.Order)
+            .options(selectinload(models.Order.shipments), selectinload(models.Order.line_items))
+            .where(models.Order.id == oid)
+        )).scalar_one_or_none()
         if o is None:
             continue
         try:
@@ -327,12 +334,17 @@ async def run_all() -> Dict[str, Any]:
     """
     total = {"stores": 0, "created": 0, "errors": 0, "blocked": 0}
     async with AsyncSessionLocal() as db:
-        stores = (await db.execute(
-            select(models.Store).where(models.Store.is_active.is_(True),
-                                       models.Store.auto_awb_enabled.is_(True))
-        )).scalars().all()
-        for s in stores:
-            dom = s.domain
+        # ID-uri, nu instanțe: run_store face commit/rollback, iar ambele EXPIRĂ tot ce e în sesiune.
+        # Citirea `s.domain` la magazinul URMĂTOR ar declanșa o reîncărcare sincronă în context async
+        # (MissingGreenlet) și ar dărâma toată tura — a treia oară când aceeași capcană muşcă aici.
+        rows = (await db.execute(
+            select(models.Store.id, models.Store.domain).where(
+                models.Store.is_active.is_(True), models.Store.auto_awb_enabled.is_(True))
+        )).all()
+        for sid, dom in rows:
+            s = await db.get(models.Store, sid)
+            if s is None:
+                continue
             try:
                 res = await run_store(db, s)
             except Exception:
