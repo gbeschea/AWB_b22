@@ -28,8 +28,13 @@ def _pool() -> _pgpool.ThreadedConnectionPool:
     if _POOL is None:
         raw = re.sub(r"\+\w+", "", os.environ["DATABASE_URL"])  # postgresql+asyncpg -> postgresql (psycopg2)
         p = up.urlparse(raw); q = up.parse_qs(p.query)
+        # 1..3 era dimensionat pentru SHADOW (câteva validări răzlețe). De la flip validatorul e AUTORITAR,
+        # deci rulează pe FIECARE comandă ingerată: la ~260 webhook-uri/min `getconn()` arunca imediat
+        # „connection pool exhausted" (măsurat: 18ms secvențial, dar 12 apeluri concurente = PoolError).
+        # Mărimea se poate regla din env fără redeploy; plafonul rămâne modest — boxul are Postgres partajat
+        # cu ~22 de aplicații (max_connections=200), vezi [[pm2-env-bleed-shared-box]].
         _POOL = _pgpool.ThreadedConnectionPool(
-            1, 3,
+            1, int(os.environ.get("NOMENCLATOR_POOL_MAX", "12")),
             host=p.hostname, port=p.port or 5432, user=p.username,
             password=up.unquote(p.password or ""), dbname=p.path.lstrip("/"),
             sslmode=q.get("sslmode", ["disable"])[0],
