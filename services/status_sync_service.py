@@ -42,9 +42,12 @@ _TERMINAL = {"delivered", "refused", "canceled"}
 _FULFILL_TRIGGER = {"in_transit", "shipped", "pickup_office", "delivered"}
 
 # Per-run cap so one cycle can't run unbounded; the loop picks up the rest next cycle.
-# Debitul per tură. Cu ~70k shipmenturi nepollate (moștenite la instalare), 250/tură însemna 3 zile ca să
-# le vezi statusul; 1000/tură × 0,2s pauză ≈ 200s, adică tot sub intervalul de 900s. Reglabil din env.
-_DEFAULT_LIMIT = int(os.environ.get("AWB_STATUS_POLL_LIMIT", "1000"))
+# Debitul per tură. ATENȚIE: o tură ține O SINGURĂ sesiune deschisă cât durează toate apelurile, deci
+# limita e și un plafon de timp-de-ținere a conexiunii. Am încercat 1000 ca să golesc mai repede coada
+# moștenită (~70k) și am epuizat pool-ul în câteva minute (1000 × 0,2s ≈ 200s cu sesiunea blocată, peste
+# traficul de webhook). 250 e valoarea care ține. Ca să crești debitul REAL, taie tura în bucăți cu sesiuni
+# separate — nu urca limita. Reglabil din env pentru experimente controlate.
+_DEFAULT_LIMIT = int(os.environ.get("AWB_STATUS_POLL_LIMIT", "250"))
 # A tiny pause between courier calls so we don't hammer their APIs.
 _PER_CALL_SLEEP = 0.2
 # Postgres advisory-lock key — ensures only ONE poller runs across workers/containers.
