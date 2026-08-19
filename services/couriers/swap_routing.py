@@ -4,14 +4,19 @@ Un swap nu e o livrare obișnuită: curierul livrează produsul nou ȘI ridică 
 contract separat („DPD SWAP" la noi). Pe connectorul normal, coletul pleacă fără ridicare — clientul
 rămâne cu produsul vechi în mână și cineva reface manual toată operațiunea.
 
-Azi alegerea o face omul din CS, în xConnector, când plasează retrimiterea — și se pierde des:
-măsurat pe 60 de zile, din comenzile marcate `swap`, 40 au plecat pe DPD SWAP și 51 pe DPD Romania.
-Regula asta o face determinist.
+SEMNALUL e TAG-ul exact `swap`, nimic altceva. Pe 90 de zile, toate cele 6 comenzi cu tag-ul `swap`
+au plecat pe DPD SWAP — 6 din 6, fără excepție. Deci regula asta nu schimbă practica, o face
+deterministă (azi o ține un om minte, când plasează retrimiterea).
 
-CAPCANĂ ocolită deliberat: `duplicata` NU înseamnă swap, deși apare pe multe retrimiteri. Pe 30 de
-zile, comenzile cu `duplicata` au plecat 4410 pe DPD Romania față de 66 pe DPD SWAP — e un marcaj
-de cu totul altceva (factură duplicat). Dacă l-am trata ca semnal de swap, am muta ~4400 de comenzi
-normale pe un contract de schimb. Semnalul e DOAR cuvântul `swap`.
+DOUĂ capcane, ambele la un caracter distanță de adevăr:
+  • `swap_request_bi` NU e swap. 60 de comenzi în 90 de zile, din care 56 au plecat pe connectorul
+    normal — e un flag de BI, nu o instrucțiune de expediere. Potrivirea pe subșir („conține swap")
+    l-ar prinde și ar muta 56 de comenzi pe contractul de schimb. Comparăm tag-uri ÎNTREGI.
+  • `duplicata` NU e swap, deși apare pe multe retrimiteri (inclusiv pe comenzile de la care a
+    pornit discuția). Peste 4400 de comenzi cu `duplicata` în 30 de zile pleacă normal.
+
+Nu ne uităm în NOTĂ: e text liber scris de oameni, unde „swap" apare și în „clientul a cerut swap
+dar nu se poate". Tag-ul e pus deliberat; nota e conversație.
 """
 from __future__ import annotations
 
@@ -21,14 +26,13 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# `\bswap\b`: eticheta e „swap", nu o subșiră întâmplătoare. („inlocuire" NU e semnal — cele 8 comenzi
-# marcate așa au plecat toate pe connectorul normal, deci nu e contractul de schimb.)
-_SWAP_RE = re.compile(r"\bswap\b", re.I)
+_SWAP_TAG = "swap"
 
 
 def is_swap_order(order) -> bool:
-    blob = "%s %s" % (getattr(order, "tags", "") or "", getattr(order, "note", "") or "")
-    return bool(_SWAP_RE.search(blob))
+    """Tag-ul `swap` EXACT, comparat pe tag întreg. `swap_request_bi` și `swapped-out` nu se potrivesc."""
+    tags = (getattr(order, "tags", "") or "")
+    return any(t.strip().lower() == _SWAP_TAG for t in tags.split(","))
 
 
 def pick_connector(order, connectors: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
