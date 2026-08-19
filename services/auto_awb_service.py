@@ -19,6 +19,7 @@ from sqlalchemy.orm import selectinload
 
 import models
 from database import AsyncSessionLocal
+from services import address_rescue
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,15 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
     )
     # Adresele proaste se rutează la CS INDIFERENT dacă avem sau nu comenzi de expediat: altfel un
     # magazin fără trafic nou le-ar lăsa suspendate la nesfârșit (ieșeam mai jos pe `eligible: 0`).
+    # ÎNTÂI încercăm să salvăm adresa (revalidare + corecție agentică), ABIA APOI o predăm la CS.
+    # Ordinea inversă ar face din CS prima soluție, nu ultima — exact ce evita cronul, care relua.
+    rescued = {}
+    try:
+        rescued = await address_rescue.rescue_store(db, store, store_id)
+    except Exception:
+        await db.rollback()
+        logger.exception("salvarea adreselor a picat pe %s", store_domain)
+
     bad_addr = 0
     try:
         bad_addr = await _route_bad_addresses(db, store, store_id)
@@ -117,7 +127,8 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
 
     orders = (await db.execute(stmt)).scalars().all()
     if not orders:
-        return {"eligible": 0, "bad_address_to_cs": bad_addr}
+        return {"eligible": 0, "bad_address_to_cs": bad_addr,
+                "addr_rescued": (rescued.get("fixed", 0) + rescued.get("repaired", 0))}
 
     # Comenzile pe care le-am ABANDONAT (prea multe eșecuri) sau le-am predat deja la CS nu se mai
     # reîncearcă: altfel ocupă permanent cota de 25/magazin (ordonată crescător pe dată) și blochează
@@ -238,7 +249,8 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
                 store_domain, len(created), len(errors), no_route, waiting_multi, blocked)
     return {"created": len(created), "errors": len(errors), "no_route": no_route,
             "waiting_multi_location": waiting_multi, "blocked_by_shopify": blocked,
-            "bad_address_to_cs": bad_addr, "held_by_rule": held_by_rule}
+            "bad_address_to_cs": bad_addr, "held_by_rule": held_by_rule,
+            "addr_rescued": (rescued.get("fixed", 0) + rescued.get("repaired", 0))}
 
 
 async def _shopify_gate(store, order) -> Dict[str, Any]:
@@ -275,7 +287,10 @@ async def _shopify_gate(store, order) -> Dict[str, Any]:
     return out
 
 
-_BAD_ADDR_GRACE_MIN = 20   # răgaz ca validatorul (și eventuala corecție) să-și facă treaba
+# Răgaz până la predarea către CS. Era 20 min — prea agresiv de când există salvarea de adrese:
+# producea un tichet pentru adrese pe care corecția agentică le repară singură câteva minute mai
+# târziu. 2h dau salvării ~20 de încercări și rămân mult sub cele 12h pe care le aștepta cronul.
+_BAD_ADDR_GRACE_MIN = 120
 
 
 async def _apply_special_rules(db, store, order) -> Optional[str]:
@@ -391,6 +406,7 @@ async def run_all() -> Dict[str, Any]:
             total["blocked"] += res.get("blocked_by_shopify", 0)
             total["bad_addr_cs"] = total.get("bad_addr_cs", 0) + res.get("bad_address_to_cs", 0)
             total["held_by_rule"] = total.get("held_by_rule", 0) + res.get("held_by_rule", 0)
+            total["addr_rescued"] = total.get("addr_rescued", 0) + res.get("addr_rescued", 0)
     return total
 
 
@@ -420,7 +436,8 @@ async def run_forever(interval_sec: int = 300) -> None:
                         # a sărit 5 comenzi arată identic cu una care n-a avut de lucru — exact confuzia
                         # care a costat 10 minute la pornirea MagDeal.
                         if (res.get("created") or res.get("errors") or res.get("blocked")
-                                or res.get("bad_addr_cs") or res.get("held_by_rule")):
+                                or res.get("bad_addr_cs") or res.get("held_by_rule")
+                                or res.get("addr_rescued")):
                             logger.info("auto-awb pass: %s", res)
                     finally:
                         await conn.execute(
