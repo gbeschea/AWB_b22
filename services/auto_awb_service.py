@@ -120,7 +120,8 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
 
     bad_addr = 0
     try:
-        bad_addr = await _route_bad_addresses(db, store, store_id)
+        bad_addr = await _route_bad_addresses(db, store, store_id,
+                                              skip_ids=rescued.get("touched") or set())
     except Exception:
         await db.rollback()
         logger.exception("rutarea adreselor proaste a picat pe %s", store_domain)
@@ -128,7 +129,8 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
     orders = (await db.execute(stmt)).scalars().all()
     if not orders:
         return {"eligible": 0, "bad_address_to_cs": bad_addr,
-                "addr_rescued": (rescued.get("fixed", 0) + rescued.get("repaired", 0))}
+                "addr_rescued": (rescued.get("fixed", 0) + rescued.get("repaired", 0)),
+            "addr_unstuck": rescued.get("unstuck", 0)}
 
     # Comenzile pe care le-am ABANDONAT (prea multe eșecuri) sau le-am predat deja la CS nu se mai
     # reîncearcă: altfel ocupă permanent cota de 25/magazin (ordonată crescător pe dată) și blochează
@@ -157,7 +159,13 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
     # EXPIRĂ toate instanțele sesiunii. Următoarea comandă ar arunca MissingGreenlet la simpla citire a unui
     # atribut (refresh sincron în sesiune async). Reîncărcăm comanda curată la fiecare iterație.
     order_ids = [o.id for o in orders]
+    # Comenzile atinse de salvare în tura ASTA nu se expediază acum. Ridicăm hold-ul în Shopify și,
+    # o secundă mai târziu, xConnector încă vede comanda blocată → 422. Nu e o eroare reală, dar
+    # murdărește contorul de eșecuri și logul. Shopify se așază până la tura următoare (5 min).
+    _just_touched = rescued.get("touched") or set()
     for _oid in order_ids:
+        if _oid in _just_touched:
+            continue
         o = (await db.execute(
             select(models.Order)
             .options(selectinload(models.Order.line_items), selectinload(models.Order.store),
@@ -320,7 +328,7 @@ async def _apply_special_rules(db, store, order) -> Optional[str]:
         return r["contains"]
     return None
 
-async def _route_bad_addresses(db, store, store_id: int) -> int:
+async def _route_bad_addresses(db, store, store_id: int, skip_ids=None) -> int:
     """Adresele rămase INVALIDE ajung la CS — altfel comanda nu merge nicăieri.
 
     Auto-AWB cere adresă validă, și pe bună dreptate. Dar nimic nu ducea mai departe comenzile pe care
@@ -350,8 +358,11 @@ async def _route_bad_addresses(db, store, store_id: int) -> int:
                 models.CSQueueItem.order_id == models.Order.id).exists(),
         ).order_by(models.Order.created_at.asc()).limit(25)
     )).scalars().all()
+    skip_ids = skip_ids or set()
     n = 0
     for oid in rows:
+        if oid in skip_ids:
+            continue      # tocmai reparată în tura asta — statusul nou vine prin webhook în câteva secunde
         # `enqueue_order` citește `order.shipments` (ca să nu pună hold pe o comandă deja plecată).
         # E o relație LENEȘĂ: cu `db.get` simplu, prima atingere încearcă un SELECT sincron în context
         # async și aruncă MissingGreenlet — deci încărcăm explicit ce va atinge.
@@ -407,6 +418,7 @@ async def run_all() -> Dict[str, Any]:
             total["bad_addr_cs"] = total.get("bad_addr_cs", 0) + res.get("bad_address_to_cs", 0)
             total["held_by_rule"] = total.get("held_by_rule", 0) + res.get("held_by_rule", 0)
             total["addr_rescued"] = total.get("addr_rescued", 0) + res.get("addr_rescued", 0)
+            total["addr_unstuck"] = total.get("addr_unstuck", 0) + res.get("addr_unstuck", 0)
     return total
 
 
@@ -437,7 +449,7 @@ async def run_forever(interval_sec: int = 300) -> None:
                         # care a costat 10 minute la pornirea MagDeal.
                         if (res.get("created") or res.get("errors") or res.get("blocked")
                                 or res.get("bad_addr_cs") or res.get("held_by_rule")
-                                or res.get("addr_rescued")):
+                                or res.get("addr_rescued") or res.get("addr_unstuck")):
                             logger.info("auto-awb pass: %s", res)
                     finally:
                         await conn.execute(

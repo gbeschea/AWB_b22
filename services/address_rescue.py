@@ -37,8 +37,16 @@ _PER_STORE_CAP = 15        # lot mărginit: repararea face apeluri externe
 _VALID = ("valid", "validat")
 
 
-async def rescue_store(db, store, store_id: int) -> Dict[str, int]:
-    """Încearcă să salveze adresele invalide ale unui magazin. Întoarce {tried, fixed, repaired}."""
+async def rescue_store(db, store, store_id: int) -> Dict[str, Any]:
+    """Încearcă să salveze adresele invalide ale unui magazin.
+
+    Întoarce {tried, fixed, repaired, touched} — `touched` = ID-urile atinse în tura asta. Apelantul
+    TREBUIE să le excludă de la predarea către CS: corecția agentică se scrie în Shopify și se întoarce
+    în OH prin webhook, cu 2-3 secunde întârziere. Rutarea către CS, care rulează sincron imediat după,
+    ar vedea încă `invalid` și ar deschide tichet + hold pentru o adresă TOCMAI reparată — comanda
+    rămâne blocată în spatele propriei reparații. S-a întâmplat pe GEN17615: reparată la 22:03:20,
+    revalidată la 22:03:22, cu tichet deschis în aceeași tură.
+    """
     from services import address_service
 
     now = datetime.now(timezone.utc)
@@ -56,7 +64,18 @@ async def rescue_store(db, store, store_id: int) -> Dict[str, int]:
                 models.Shipment.awb.isnot(None)).exists(),
         ).order_by(models.Order.created_at.desc()).limit(_PER_STORE_CAP)
     )).scalars().all()
-    out = {"tried": 0, "fixed": 0, "repaired": 0}
+    out: Dict[str, Any] = {"tried": 0, "fixed": 0, "repaired": 0, "unstuck": 0, "touched": set()}
+
+    # ÎNTÂI deblocăm ce s-a reparat deja: o comandă cu adresa devenită VALIDĂ dar cu tichetul de
+    # adresă încă deschis rămâne blocată LA INFINIT — auto-AWB sare orice comandă cu tichet, deci
+    # corecția nu folosește la nimic. Nu intră în bucla de mai jos, fiindcă aceea caută adrese
+    # INVALIDE; e nevoie de o trecere separată.
+    try:
+        out["unstuck"] = await _unstick_repaired(db, store, store_id, out["touched"])
+    except Exception:
+        await db.rollback()
+        logger.info("salvare-adresa: deblocarea a picat pe %s", getattr(store, "domain", "?"))
+
     if not rows:
         return out
 
@@ -76,7 +95,9 @@ async def rescue_store(db, store, store_id: int) -> Dict[str, int]:
             await db.commit()
             if (getattr(res, "status", None) or o.address_status or "").lower() in _VALID:
                 out["fixed"] += 1
+                out["touched"].add(oid)
                 logger.info("salvare-adresa: %s a devenit VALIDĂ la revalidare", name)
+                await _clear_stale_address_ticket(db, store, o)
                 continue
         except Exception:
             await db.rollback()
@@ -88,6 +109,7 @@ async def rescue_store(db, store, store_id: int) -> Dict[str, int]:
             await db.commit()
             if fixed:
                 out["repaired"] += 1
+                out["touched"].add(oid)
                 logger.info("salvare-adresa: %s corectată agentic", name)
         except Exception:
             await db.rollback()
@@ -123,3 +145,66 @@ async def _repair_via_xconnector(db, store, order) -> bool:
     rep = await address_repair.repair_address(svc, acc.credentials, xo, order,
                                               apply=True, store=store)
     return bool(rep.get("changed"))
+
+
+async def _clear_stale_address_ticket(db, store, order) -> bool:
+    """Închide tichetul de adresă și ridică hold-ul când adresa a devenit VALIDĂ.
+
+    Fără asta, o adresă reparată rămâne blocată la infinit în spatele propriului tichet: auto-AWB sare
+    orice comandă cu tichet deschis, deci corecția nu folosește la nimic. Atingem DOAR tichetele
+    deschise de automat (`created_by='auto'`, motiv `wrong_address`) — dacă un OM a deschis tichetul,
+    tot un om îl închide.
+    """
+    if (order.address_status or "").lower() not in _VALID:
+        return False
+    item = (await db.execute(
+        select(models.CSQueueItem).where(
+            models.CSQueueItem.order_id == order.id,
+            models.CSQueueItem.status != "solved",
+            models.CSQueueItem.reason == "wrong_address",
+            models.CSQueueItem.created_by == "auto")
+    )).scalar_one_or_none()
+    if item is None:
+        return False
+    item.status = "solved"
+    notes = list(item.notes or [])
+    notes.append({"by": "auto", "text": "Adresa a fost corectată automat și e validă — tichet închis."})
+    item.notes = notes
+    order.is_on_hold_shopify = False
+    try:
+        from services import shopify_service
+        await shopify_service.release_fulfillment_order_holds(store, order.shopify_order_id)
+    except Exception as e:
+        logger.info("salvare-adresa: n-am putut ridica hold-ul pt %s: %s", order.name, e)
+    logger.info("salvare-adresa: %s reparată → tichet CS închis, hold ridicat", order.name)
+    return True
+
+
+async def _unstick_repaired(db, store, store_id: int, touched: set) -> int:
+    """Comenzi cu adresa VALIDĂ dar cu tichet de adresă încă deschis → închide tichetul, ridică hold-ul."""
+    ids = (await db.execute(
+        select(models.Order.id).where(
+            models.Order.store_id == store_id,
+            models.Order.cancelled_at.is_(None),
+            models.Order.fulfilled_at.is_(None),
+            models.Order.address_status.in_(_VALID),
+            select(models.CSQueueItem.id).where(
+                models.CSQueueItem.order_id == models.Order.id,
+                models.CSQueueItem.status != "solved",
+                models.CSQueueItem.reason == "wrong_address",
+                models.CSQueueItem.created_by == "auto").exists(),
+        ).limit(_PER_STORE_CAP)
+    )).scalars().all()
+    n = 0
+    for oid in ids:
+        o = await db.get(models.Order, oid)
+        if o is None:
+            continue
+        try:
+            if await _clear_stale_address_ticket(db, store, o):
+                await db.commit()
+                touched.add(oid)
+                n += 1
+        except Exception:
+            await db.rollback()
+    return n
