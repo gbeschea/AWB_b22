@@ -34,3 +34,36 @@ ALTER TABLE stores ADD COLUMN IF NOT EXISTS comp boolean NOT NULL DEFAULT false;
 -- AUTOMATION SCHEDULE (2026-08-18): programarea per-magazin a automatizărilor (mod on_order|cron|on_delivered|off
 -- + minute) + acțiuni de risc, aleasă de merchant peste default-uri (services.automation_config). NULL = default-uri.
 ALTER TABLE stores ADD COLUMN IF NOT EXISTS automation_schedule jsonb;
+
+-- AWB GIVEUP / failcount (2026-08-19): contorul de eșecuri AWB per comandă (services/awb_giveup.py), port
+-- din cronul xConnector (AWB_GIVEUP_AFTER + _awb_failcount_bump). Un AWB care pică e reîncercat la fiecare
+-- tură; când eroarea „tranzitorie" nu se mai rezolvă niciodată (adresă moartă / stradă absentă din
+-- nomenclatorul curierului) comanda bucla la infinit — măsurat în cron: comenzi picate 7 ture la rând, la
+-- care nu se uita nimeni. După N eșecuri comanda e predată la CS (HOLD) în loc să fie reîncercată.
+--
+-- De ce tabelă separată și nu o coloană pe `orders`: cronul ținea contorul într-un fișier JSON; aici trebuie
+-- în DB, dar baza NU e pe alembic (vezi antetul) — un deploy făcut înaintea acestui patch, cu coloana și în
+-- models.py, ar rupe ORICE citire de comenzi. Cu tabelă separată, dacă patch-ul lipsește, degradează doar
+-- funcția de giveup (awb_giveup.py prinde eroarea, o logează și se comportă ca înainte).
+-- `order_id` e cheie primară (un rând per comandă) + ON DELETE CASCADE (moare cu comanda).
+CREATE TABLE IF NOT EXISTS awb_fail_counts (
+    order_id      integer PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+    store_id      integer,                        -- denormalizat: rapoarte per magazin fără join
+    fails         integer NOT NULL DEFAULT 0,     -- eșecuri cumulate de la ultimul reset
+    last_class    varchar(16),                    -- transient | permanent | config
+    last_error    text,                           -- ultimul mesaj de la curier (pentru omul de la CS)
+    first_fail_at timestamptz NOT NULL DEFAULT now(),
+    last_fail_at  timestamptz NOT NULL DEFAULT now(),
+    held_at       timestamptz                     -- când am predat-o la CS (NULL = încă în retry)
+);
+CREATE INDEX IF NOT EXISTS ix_awb_fail_counts_store ON awb_fail_counts (store_id);
+
+-- POLLING STARVATION (2026-08-19): bucla de status-sync alegea shipmenturile după `last_status_at ASC NULLS
+-- FIRST`, dar un poll EȘUAT (curier nerezolvabil, eroare de API) NU seta niciun timestamp → aceleași
+-- shipmenturi rămâneau veșnic în capul cozii și blocau restul. Măsurat: 53.583 din 53.746 eligibile NU
+-- fuseseră pollate NICIODATĂ (99,7%) — practic doar un magazin avea statusuri de curier, deci tab-urile
+-- „Livrate/În tranzit/Refuzate" erau goale pe 25 din 27 magazine.
+-- `last_poll_at` = când am ÎNCERCAT ultima dată (indiferent de rezultat), separat de `last_status_at` =
+-- când a raportat curierul. Coada se ordonează după ÎNCERCARE, deci nimic nu mai poate flămânzi.
+ALTER TABLE shipments ADD COLUMN IF NOT EXISTS last_poll_at timestamptz;
+CREATE INDEX IF NOT EXISTS ix_shipments_last_poll_at ON shipments (last_poll_at);

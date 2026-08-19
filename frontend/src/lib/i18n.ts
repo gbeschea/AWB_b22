@@ -66,6 +66,8 @@ const STR: Record<string, { en?: string; ro: string }> = {
   "exp.total": { en: "Total", ro: "Total" },
   "exp.edit": { en: "Edit order", ro: "Modifică comanda" },
   "pay.pending": { en: "Payment pending", ro: "Plată în așteptare" },
+  "count.showing": { en: "{n} orders in this view", ro: "{n} comenzi în acest view" },
+  "count.filtered": { en: "filtered", ro: "filtrat" },
   "note.title": { en: "Order note", ro: "Notă comandă" },
   "note.placeholder": { en: "Add a note — it is saved on the Shopify order.", ro: "Adaugă o notă — se salvează pe comanda din Shopify." },
   // ── Programare automatizări ──

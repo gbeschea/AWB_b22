@@ -410,6 +410,7 @@ async def list_orders(
     status: Optional[str] = None,
     scope: Optional[str] = None,
     lens: Optional[str] = None,
+    with_lens_counts: bool = False,
     # --- faceted filters (xConnector-style) ---
     payment: Optional[str] = None,          # card | cod
     delivery: Optional[str] = None,         # home | locker
@@ -580,19 +581,24 @@ async def list_orders(
         else:
             base = base.where(models.Order.created_at <= _dt2)
 
+    # Predicatele lentilelor definite O SINGURA DATA: le folosesc si pentru filtrare, si pentru numaratoarea
+    # per tab. Doua liste separate ar diverge tacut, iar utilizatorul ar vedea un numar care nu se potriveste
+    # cu randurile de sub el.
+    _LENS_PREDICATES = {
+        "unfulfilled": lambda q: q.where(models.Order.cancelled_at.is_(None), ~has_awb.exists(),
+                                         ~cs_open.exists()),
+        "fulfilled":   lambda q: q.where(has_awb.exists()),
+        "in_transit":  lambda q: q.where(
+            _moving("%curs%", "%tranzit%", "%transit%", "%out for delivery%").exists(),
+            ~_moving("%livrat%", "%delivered%").exists()),
+        "delivered":   lambda q: q.where(_moving("%livrat%", "%delivered%").exists()),
+        "refused":     lambda q: q.where(or_(models.Order.cancelled_at.isnot(None),
+                                             _moving("%refuz%", "%retur%", "%return%").exists())),
+    }
+    base_prelens = base          # snapshot: aceleasi filtre (cautare, date, magazin), FARA lentila
     lens_v = (lens or "").strip().lower()
-    if lens_v == "unfulfilled":
-        base = base.where(models.Order.cancelled_at.is_(None), ~has_awb.exists(), ~cs_open.exists())
-    elif lens_v == "fulfilled":
-        base = base.where(has_awb.exists())
-    elif lens_v == "in_transit":
-        base = base.where(_moving("%curs%", "%tranzit%", "%transit%", "%out for delivery%").exists(),
-                          ~_moving("%livrat%", "%delivered%").exists())
-    elif lens_v == "delivered":
-        base = base.where(_moving("%livrat%", "%delivered%").exists())
-    elif lens_v == "refused":
-        base = base.where(or_(models.Order.cancelled_at.isnot(None),
-                              _moving("%refuz%", "%retur%", "%return%").exists()))
+    if lens_v in _LENS_PREDICATES:
+        base = _LENS_PREDICATES[lens_v](base)
 
     _SORTS = {
         "date_desc": desc(models.Order.created_at), "date_asc": asc(models.Order.created_at),
@@ -619,11 +625,22 @@ async def list_orders(
                 models.CSQueueItem.order_id.in_(row_ids), models.CSQueueItem.status != "solved")
         )).scalars().all())
 
+    # Numarul pe FIECARE tab, cu filtrele curente aplicate ("cate comenzi am in view-ul asta").
+    # Optional: 6 COUNT-uri in plus, cerute de UI o data per schimbare de filtru, nu la fiecare pagina.
+    lens_counts = None
+    if with_lens_counts:
+        lens_counts = {"all": (await db.execute(
+            select(func.count()).select_from(base_prelens.subquery()))).scalar() or 0}
+        for _k, _f in _LENS_PREDICATES.items():
+            lens_counts[_k] = (await db.execute(
+                select(func.count()).select_from(_f(base_prelens).subquery()))).scalar() or 0
+
     return {
         "orders": [_order_json(o, o.id in in_cs_ids) for o in rows],
         "total": total,
         "page": page,
         "per_page": per_page,
+        "lens_counts": lens_counts,
     }
 
 

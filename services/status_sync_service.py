@@ -42,7 +42,9 @@ _TERMINAL = {"delivered", "refused", "canceled"}
 _FULFILL_TRIGGER = {"in_transit", "shipped", "pickup_office", "delivered"}
 
 # Per-run cap so one cycle can't run unbounded; the loop picks up the rest next cycle.
-_DEFAULT_LIMIT = 250
+# Debitul per tură. Cu ~70k shipmenturi nepollate (moștenite la instalare), 250/tură însemna 3 zile ca să
+# le vezi statusul; 1000/tură × 0,2s pauză ≈ 200s, adică tot sub intervalul de 900s. Reglabil din env.
+_DEFAULT_LIMIT = int(os.environ.get("AWB_STATUS_POLL_LIMIT", "1000"))
 # A tiny pause between courier calls so we don't hammer their APIs.
 _PER_CALL_SLEEP = 0.2
 # Postgres advisory-lock key — ensures only ONE poller runs across workers/containers.
@@ -113,7 +115,12 @@ async def _select_shipments(db: AsyncSession, store_id: Optional[int], limit: in
                 models.Shipment.derived_status.notin_(list(_TERMINAL)),
             ),
         )
-        .order_by(models.Shipment.last_status_at.asc().nullsfirst(), models.Shipment.id.asc())
+        # Ordonăm după ÎNCERCARE, nu după status: un poll eșuat (curier nerezolvabil, API căzut) nu mai
+        # poate ține shipmentul în capul cozii la infinit (starvation măsurat: 99,7% nepollate).
+        # `id DESC` = coletele RECENTE primele. Cu `id ASC` se pollau întâi comenzile cele mai vechi
+        # (livrate demult, fără valoare operațională) iar cele din tranzit așteptau zile. Nimic nu se
+        # pierde: vechile intră tot în coadă, doar după cele care contează azi.
+        .order_by(models.Shipment.last_poll_at.asc().nullsfirst(), models.Shipment.id.desc())
         .limit(limit)
     )
     if store_id is not None:
@@ -123,6 +130,9 @@ async def _select_shipments(db: AsyncSession, store_id: Optional[int], limit: in
 
 async def _sync_shipment(db: AsyncSession, shipment: models.Shipment) -> str:
     """Poll one shipment and reconcile Shopify. Returns a short action tag for the summary."""
+    # Ștampilăm ÎNCERCAREA înainte de orice ieșire (skip/eroare/succes) — ăsta e mecanismul care împiedică
+    # coada să flămânzească.
+    shipment.last_poll_at = _now()
     order = shipment.order
     store = order.store if order else None
     if not order or not store or not store.is_active or not order.shopify_order_id:

@@ -278,6 +278,10 @@ class Shipment(Base):
   printed_at = Column(TIMESTAMP(timezone=True), nullable=True, index=True)
   last_status = Column(String(255), nullable=True, index=True)
   last_status_at = Column(TIMESTAMP(timezone=True), nullable=True)
+  # Când am ÎNCERCAT ultima dată să interogăm curierul (indiferent dacă a mers). Separat de `last_status_at`
+  # (când a raportat curierul): un poll eșuat trebuie să mute totuși shipmentul la coada rândului, altfel
+  # eșecurile permanente blochează coada la infinit — vezi scripts/schema_patches.sql.
+  last_poll_at = Column(TIMESTAMP(timezone=True), nullable=True, index=True)
   derived_status = Column(String(255), nullable=True)
   # When THIS label was created by the app — the basis for the monthly plan quota. Indexed so the
   # per-store month count is cheap. Historical rows (pre-migration) are NULL and don't count.

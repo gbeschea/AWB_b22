@@ -602,7 +602,8 @@ export default function Orders() {
     setLoading(true);
     setError(null);
     try {
-      setData(await listOrders({ page, per_page: perPage, q: debouncedQ, scope, lens, sort, ...filters }));
+      setData(await listOrders({ page, per_page: perPage, q: debouncedQ, scope, lens, sort,
+                                with_lens_counts: true, ...filters }));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Failed to load orders.");
     } finally {
@@ -787,13 +788,19 @@ export default function Orders() {
     try { localStorage.setItem(VIEWS_KEY, JSON.stringify(next)); } catch { /* quota */ }
   };
 
+  // Numarul de comenzi pe fiecare tab, cu filtrele CURENTE aplicate (raspunde la "cate am in view-ul asta").
+  const lc = data?.lens_counts ?? null;
+  const withCount = (id: string, label: string) => {
+    const n = lc ? (lc as unknown as Record<string, number>)[id] : undefined;
+    return n === undefined ? label : `${label} (${n.toLocaleString("ro-RO")})`;
+  };
   const lensTabs = [
-    { id: "all", content: t("lens.all") },
-    { id: "unfulfilled", content: t("lens.unfulfilled") },
-    { id: "fulfilled", content: t("lens.fulfilled") },
-    { id: "in_transit", content: t("lens.in_transit") },
-    { id: "delivered", content: t("lens.delivered") },
-    { id: "refused", content: t("lens.refused") },
+    { id: "all", content: withCount("all", t("lens.all")) },
+    { id: "unfulfilled", content: withCount("unfulfilled", t("lens.unfulfilled")) },
+    { id: "fulfilled", content: withCount("fulfilled", t("lens.fulfilled")) },
+    { id: "in_transit", content: withCount("in_transit", t("lens.in_transit")) },
+    { id: "delivered", content: withCount("delivered", t("lens.delivered")) },
+    { id: "refused", content: withCount("refused", t("lens.refused")) },
   ];
   const lensIndex = Math.max(0, lensTabs.findIndex((t) => t.id === lens));
 
@@ -1494,6 +1501,14 @@ export default function Orders() {
         <div style={{ padding: "12px" }}>
           {/* No command bar here any more: the ⌘K console (bottom-right, on every page) is the one
               place commands live, so Orders opens on its filters instead of a wall of syntax. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, paddingBottom: 6 }}>
+            <Text as="span" variant="bodySm" tone="subdued">
+              {loading ? "…" : t("count.showing").replace("{n}", total.toLocaleString("ro-RO"))}
+            </Text>
+            {(Object.keys(filters).length > 0 || debouncedQ) && (
+              <Badge tone="info" size="small">{t("count.filtered")}</Badge>
+            )}
+          </div>
           <Filters
             queryValue={q}
             queryPlaceholder="Search by order #, phone or city"

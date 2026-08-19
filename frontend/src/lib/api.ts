@@ -113,7 +113,11 @@ export interface OrderRow {
   tracking_url: string | null;
 }
 
+export interface LensCounts {
+  all: number; unfulfilled: number; fulfilled: number; in_transit: number; delivered: number; refused: number;
+}
 export interface OrdersResponse {
+  lens_counts?: LensCounts | null;
   orders: OrderRow[];
   total: number;
   page: number;
@@ -187,7 +191,8 @@ export interface OrderFilters {
   date_from?: string; date_to?: string; sort?: string;
 }
 export function listOrders(
-  params: { page?: number; per_page?: number; q?: string; status?: string; scope?: string; lens?: string } & OrderFilters = {},
+  params: { page?: number; per_page?: number; q?: string; status?: string; scope?: string; lens?: string;
+            with_lens_counts?: boolean } & OrderFilters = {},
 ) {
   const qs = new URLSearchParams();
   if (params.page) qs.set("page", String(params.page));
@@ -196,6 +201,7 @@ export function listOrders(
   if (params.status) qs.set("status", params.status);
   if (params.scope) qs.set("scope", params.scope);
   if (params.lens && params.lens !== "all") qs.set("lens", params.lens);
+  if (params.with_lens_counts) qs.set("with_lens_counts", "true");
   const keys: (keyof OrderFilters)[] = ["payment", "delivery", "printed", "invoiced", "order_status",
     "delivery_status", "address_status", "tag", "product", "product_tag", "province", "city", "courier",
     "qty_min", "qty_max", "total_min", "total_max", "date_from", "date_to", "sort"];
