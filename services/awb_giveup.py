@@ -86,6 +86,14 @@ PERMANENT_AFTER = _env_int("AWB_PERMANENT_AFTER", 1)   # respins permanent → C
 _MAX_ERR = 500          # cât din mesajul de eroare păstrăm (e pentru omul de la CS, nu pentru arhivă)
 
 # Eroare de INSTALARE/abonament, nu a comenzii → nu consumă buget, nu ajunge la CS ca adresă greșită.
+# xConnector întoarce un mesaj CATCH-ALL care enumeră toate cauzele posibile („…address validation failed,
+# no open fulfillment orders, no connector configured, or filter conditions not met"). El se potrivește cu
+# cuvintele-cheie din TOATE categoriile — măsurat la primul canary: „no connector" îl marca drept problemă
+# de CONFIGURARE, deci comanda nu era numărată, nu ajungea niciodată la CS și se reîncerca la infinit.
+# Când vedem enumerarea, IGNORĂM cuvintele de configurare și lăsăm ancora cronului („was not created") să
+# decidă → tranzitoriu, cu contor și predare la CS după N ture.
+_CATCHALL_RE = re.compile(r"possible reasons", re.I)
+
 _CONFIG_MARKS = (
     "nu are api_key", "api_key", "niciun connector", "no connector", "unsupported courier",
     "isn't supported", "nu are shopify_order_id", "plan limit reached", "upgrade to pro",
@@ -165,7 +173,7 @@ def classify(err: Any, status: Optional[int] = None) -> str:
         except Exception:
             st = None
 
-        if st == 402 or any(k in msg for k in _CONFIG_MARKS):
+        if st == 402 or (not _CATCHALL_RE.search(msg) and any(k in msg for k in _CONFIG_MARKS)):
             return CONFIG
         if st in _TRANSIENT_STATUS:
             return TRANSIENT

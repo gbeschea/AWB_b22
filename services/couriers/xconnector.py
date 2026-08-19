@@ -72,9 +72,27 @@ class XConnectorCourier(BaseCourier):
         s, d = await self._get(creds, "/api/orders/by-tracking-number", {"trackingNumber": awb})
         return d if s == 200 and isinstance(d, dict) else {}
 
+    # Lista de connectori e IDENTICĂ pentru toate comenzile aceluiași magazin și se schimbă foarte rar,
+    # dar era cerută de 2 ori PER COMANDĂ (o dată pt rutarea de locker, o dată pt alegerea default).
+    # La o tură de 18 comenzi = 36 de apeluri în rafală → xConnector limitează și întoarce gol, iar OH
+    # raporta „niciun connector activ" pe TOATE comenzile (măsurat la primul canary). Cache scurt per cheie.
+    _CONN_CACHE: Dict[str, tuple] = {}
+    _CONN_TTL = 300.0
+
     async def connectors(self, creds: Dict[str, Any]) -> List[Dict[str, Any]]:
+        import time as _t
+        key = creds.get("api_key") or ""
+        hit = self._CONN_CACHE.get(key)
+        if hit and hit[1] > _t.time():
+            return hit[0]
         s, d = await self._get(creds, "/api/merchant/connectors")
-        return d if s == 200 and isinstance(d, list) else []
+        if s == 200 and isinstance(d, list) and d:
+            self._CONN_CACHE[key] = (d, _t.time() + self._CONN_TTL)
+            return d
+        if hit:                       # API supărat (429/5xx) → mai bine lista veche decât „niciun connector"
+            logger.info("connectors: raspuns gol/eroare (%s) — folosesc lista din cache", s)
+            return hit[0]
+        return []
 
     @staticmethod
     def _doc(o: Dict[str, Any], doc_type: str) -> Optional[Dict[str, Any]]:

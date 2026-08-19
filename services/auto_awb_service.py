@@ -72,6 +72,9 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
     if not (rules or default_profile_id or default_account):
         return {"skipped": "off"}  # nothing to route with — never guess a courier
 
+    # Rollback-ul din bucla EXPIRĂ toate instanțele sesiunii, inclusiv `store`. Orice citire de atribut de
+    # pe el DUPĂ un eșec aruncă MissingGreenlet (chiar și în linia de log de la final). Capturăm acum.
+    store_id, store_domain = store.id, store.domain
     delay = int(getattr(store, "auto_awb_delay_minutes", 0) or 0)
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=delay)
 
@@ -84,7 +87,7 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
         .options(selectinload(models.Order.line_items), selectinload(models.Order.store),
                  selectinload(models.Order.shipments))
         .where(
-            models.Order.store_id == store.id,
+            models.Order.store_id == store_id,
             models.Order.cancelled_at.is_(None),
             models.Order.address_status.in_(_VALID_ADDR),
             models.Order.created_at <= cutoff,
@@ -115,7 +118,7 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
         _gave_up = await awb_giveup.gave_up_ids(db, [o.id for o in orders])
         if _gave_up:
             orders = [o for o in orders if o.id not in _gave_up]
-            logger.info("auto-awb %s: sar %d comenzi abandonate/la CS", store.domain, len(_gave_up))
+            logger.info("auto-awb %s: sar %d comenzi abandonate/la CS", store_domain, len(_gave_up))
     except Exception as e:
         logger.info("auto-awb: gave_up_ids indisponibil (%s) — continui fără filtru", e)
     if not orders:
@@ -130,7 +133,19 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
 
     created, errors, no_route, waiting_multi = [], [], 0, 0
     by_account: Dict[str, list] = {}
-    for o in orders:
+    # Lucrăm pe ID-uri, nu pe instanțele din listă: la primul eșec facem `db.rollback()`, iar rollback-ul
+    # EXPIRĂ toate instanțele sesiunii. Următoarea comandă ar arunca MissingGreenlet la simpla citire a unui
+    # atribut (refresh sincron în sesiune async). Reîncărcăm comanda curată la fiecare iterație.
+    order_ids = [o.id for o in orders]
+    for _oid in order_ids:
+        o = (await db.execute(
+            select(models.Order)
+            .options(selectinload(models.Order.line_items), selectinload(models.Order.store),
+                     selectinload(models.Order.shipments))
+            .where(models.Order.id == _oid)
+        )).scalar_one_or_none()
+        if o is None:
+            continue
         # Precedence: a manually-assigned profile > a matching rule > the store default profile.
         pid = getattr(o, "assigned_profile_id", None) or shipment_rules.pick_profile_id(o, rules) or default_profile_id
         try:
@@ -187,13 +202,14 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
                 logger.info("auto-awb: giveup a picat pt %s: %s", getattr(o, "name", "?"), ge)
 
     # One pickup request per courier account (an order routed to DPD and another to FAN each get theirs).
+    _store = await db.get(models.Store, store_id) or store     # instanță curată după eventuale rollback-uri
     for acct_key, awbs in by_account.items():
         try:
-            await _request_pickup(db, store, acct_key, awbs, {})
+            await _request_pickup(db, _store, acct_key, awbs, {})
         except Exception:
             pass
     logger.info("auto-awb %s: created=%d errors=%d no-route=%d waiting-multi=%d",
-                store.domain, len(created), len(errors), no_route, waiting_multi)
+                store_domain, len(created), len(errors), no_route, waiting_multi)
     return {"created": len(created), "errors": len(errors), "no_route": no_route,
             "waiting_multi_location": waiting_multi}
 
