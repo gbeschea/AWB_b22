@@ -121,8 +121,12 @@ async def run_store(db, store: models.Store) -> Dict[str, Any]:
                 continue  # no rule matched and no default courier — leave it for a human
             # Per-order parcel count (remembered in OH, synced from the Shopify metafield) overrides the
             # profile's default_parcels — so a 3-box order ships as 3 parcels even on a 1-parcel profile.
+            # Marcat EXPLICIT: altfel packing.apply_to_options îl SUPRASCRIE cu regula de packing a
+            # magazinului, iar numărul per-comandă (metafield-ul depozitului / harta SKU→cutii) se pierde
+            # tăcut. Ordinea din cron e: metafield per-comandă > cutii-per-SKU > 1.
             if getattr(o, "parcel_count", None):
                 opts["parcels_count"] = int(o.parcel_count)
+                opts["_explicit"] = list(set(list(opts.get("_explicit") or []) + ["parcels_count"]))
             # SAFETY: never auto-ship an order that spans multiple fulfillment LOCATIONS from a
             # single AWB (that would ship everything from one location). Flag it to CS and wait
             # for a human to split it / add a location rule. Fail-soft: a check error still ships.

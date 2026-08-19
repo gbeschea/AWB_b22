@@ -344,6 +344,9 @@ async def _enrich_product_tags(store_id: int, order_id: int) -> None:
 WEBHOOK_HANDLERS = {
     "orders/create": upsert_order_from_webhook,
     "orders/updated": upsert_order_from_webhook,
+    # Anularea trece prin ACELAȘI upsert — el citește deja `cancelled_at` din payload. Topic separat
+    # pentru că e semnalul canonic (nu ne bazăm pe orders/updated să vină și el).
+    "orders/cancelled": upsert_order_from_webhook,
     "orders/edited": handle_order_edited,
 }
 

@@ -97,9 +97,13 @@ async def _process_and_insert_orders_in_batches(
     """
     Inserează/actualizează comenzile + shipment-urile asociate în loturi pentru performanță.
     """
+    from services.utils import synth_recipient_email
+
     BATCH = 200
     total = 0
     include_pii = (pii_source or "").lower() == "shopify"
+    # For the synthesized recipient-email placeholder (the GraphQL backfill has no buyer email).
+    store_obj = await db.get(models.Store, store_id)
 
     for i in range(0, len(orders_data), BATCH):
         batch = orders_data[i : i + BATCH]
@@ -125,6 +129,10 @@ async def _process_and_insert_orders_in_batches(
                 "shopify_order_id": shopify_id,
                 "name": o.get("name", f"#{shopify_id}"),
                 "created_at": _dt(o.get("createdAt")),
+                # ANULAREA vine din sync, nu doar din webhook: comenzile anulate ÎNAINTE ca OH să fie
+                # instalat (sau cât timp webhook-urile erau căzute) intrau prin backfill ca ACTIVE și
+                # rămâneau așa pe veci — OH ar fi încercat AWB pe ele.
+                "cancelled_at": _dt(o.get("cancelledAt")),
                 "financial_status": financial_status,
                 "total_price": float(((o.get("totalPriceSet") or {}).get("shopMoney") or {}).get("amount"))
                 if o.get("totalPriceSet")
@@ -144,6 +152,9 @@ async def _process_and_insert_orders_in_batches(
                         "customer": customer_name,
                         "shipping_name": f"{shipping_address.get('firstName') or ''} {shipping_address.get('lastName') or ''}".strip()
                         or None,
+                        # No buyer email in the backfill → placeholder. Excluded from the upsert's
+                        # UPDATE set below, so a real email set by a webhook is never overwritten.
+                        "shipping_email": synth_recipient_email(store_obj, o.get("name", f"#{shopify_id}")),
                         "shipping_address1": shipping_address.get("address1"),
                         "shipping_address2": shipping_address.get("address2"),
                         "shipping_phone": shipping_address.get("phone"),
@@ -161,7 +172,8 @@ async def _process_and_insert_orders_in_batches(
 
         # upsert pe orders (unique: shopify_order_id)
         stmt = pg_insert(Order).values(to_upsert_orders)
-        update_cols = {c.name: c for c in stmt.excluded if c.name not in ("id", "shopify_order_id", "store_id")}
+        update_cols = {c.name: c for c in stmt.excluded
+                       if c.name not in ("id", "shopify_order_id", "store_id", "shipping_email")}
         stmt = stmt.on_conflict_do_update(index_elements=["shopify_order_id"], set_=update_cols).returning(
             Order.id, Order.shopify_order_id
         )

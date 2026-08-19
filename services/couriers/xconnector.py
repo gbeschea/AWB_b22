@@ -81,6 +81,55 @@ class XConnectorCourier(BaseCourier):
                 return d
         return None
 
+    # ── sanitizare INTL pentru DPD (paritate cu cronul; vezi services/couriers/dpd_intl.py) ──
+    async def ai_correct_address(self, creds: Dict[str, Any], o: Dict[str, Any],
+                                 corr: Dict[str, Any], cc: str) -> bool:
+        """Scrie corecțiile de format în comanda xConnector via ai-correct-address. True dacă 200."""
+        from . import dpd_intl
+        oid = o.get("orderId")
+        ad = dict(o.get("shippingAddress") or {})
+        if not oid or not ad or not corr:
+            return False
+        for k in ("city", "zip", "address1", "address2", "firstName", "lastName", "phone"):
+            if corr.get(k) is not None:
+                ad[k] = corr[k]
+        ad["zip"] = dpd_intl.canonical_zip(cc, ad.get("zip"))   # CZ/SK: PSČ „NNN NN" (punct unic)
+        import hashlib
+        digest = hashlib.sha1(repr(sorted(ad.items())).encode("utf-8", "replace")).hexdigest()[:12]
+        body = {
+            "orderId": oid,
+            "idempotencyKey": "oh-intl-%s-%s" % (oid, digest),
+            "appliedShippingAddress": ad,
+            "expectedAddressHash": o.get("addressHash"),
+            "expectedStatusHash": o.get("statusHash"),
+            "expectedEvidenceHash": o.get("evidenceHash"),
+            "agentClaimedConfidence": 0.95,
+            "agentRationale": "National address nomenclature reconciliation + DPD field-format limits.",
+            "modelName": "orderhub-intl-nomen", "mcpClientId": "orderhub",
+        }
+        s, d = await self._post(creds, "/api/orders/ai-correct-address", body)
+        if s != 200:
+            logger.info("xc ai-correct-address a picat (%s): %s", s, self._err(d))
+        return s == 200
+
+    async def sanitize_intl(self, creds: Dict[str, Any], o: Dict[str, Any], country_name: str) -> bool:
+        """Pașii 1-5 din dpd_intl (ZIP/city/adresă/nume/telefon) + scrierea lor. True dacă a schimbat ceva."""
+        from . import dpd_intl
+        from services.nomenclator.intl import country_code
+        cc = (country_code(country_name) or "").upper()
+        if cc not in ("CZ", "PL", "BG", "HU", "SK"):
+            return False
+        ad = o.get("shippingAddress") or {}
+        if not ad:
+            return False
+        corr = await dpd_intl.build_corrections(cc, ad, country_name)
+        if not corr:
+            return False
+        ok = await self.ai_correct_address(creds, o, corr, cc)
+        logger.info("INTL-sanitize order=%s cc=%s corr=%s -> %s",
+                    o.get("orderName") or o.get("orderId"), cc, list(corr), "OK" if ok else "FAIL")
+        return ok
+
     async def _pick_shipping_connector(self, creds: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Regula cronului: connectorul explicit din config, altfel singurul activ de curierat,
         altfel preferă DPD (default-ul producției — livrează și cross-border CZ/PL/BG/HU/SK)."""
@@ -118,11 +167,25 @@ class XConnectorCourier(BaseCourier):
             return {"success": False, "message": "comanda nu există (încă) în xConnector"}
         if self._doc(o, "SHIPPING_LABEL"):
             return {"success": False, "message": "are DEJA AWB în xConnector — folosește void + create (regen)"}
+        # INTL: adresa e validă dar DPD o respinge pe FORMAT (35 car, nume ≥2 cuvinte, telefon, PSČ).
+        # Sanitizăm ÎNAINTE de a cere eticheta (paritate cu cronul) — o singură dată per comandă.
+        country = (getattr(order, "shipping_country", None) or "")
+        if country and not (opts.get("skip_intl_sanitize")):
+            try:
+                if await self.sanitize_intl(creds, o, country):
+                    o = await self.xc_order_by_shopify_id(creds, order.shopify_order_id) or o
+            except Exception as e:
+                logger.info("INTL-sanitize a picat pt %s: %s", getattr(order, "name", "?"), e)
         con = await self._pick_shipping_connector(creds)
         if not con:
             return {"success": False, "message": "niciun connector de curierat activ pe cheia xConnector"}
+        # `parcels_count` e cheia CANONICĂ în OH (o setează packing.apply_to_options și auto_awb_service din
+        # order.parcel_count; toți ceilalți curieri o citesc — gls/sameday/fancourier/dpd). Conectorul ăsta citea
+        # doar `parcels`/`parcelCount` → numărul memorat de detectorul de colete NU ajungea niciodată la
+        # xConnector și ORICE comandă pleca cu 1 colet, tăcut. Acceptăm toate trei, canonica prima.
         body = {"orderId": o["orderId"], "connectorId": con["id"],
-                "parcelCount": int(opts.get("parcels") or opts.get("parcelCount") or 1),
+                "parcelCount": max(int(opts.get("parcels_count") or opts.get("parcels")
+                                       or opts.get("parcelCount") or 1), 1),
                 "parcelType": opts.get("parcel_type") or "BOX",
                 "notifyCustomer": bool(opts.get("notify", False))}
         s, d = await self._post(creds, "/api/actions/create-shipping-label", body)

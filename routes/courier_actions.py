@@ -199,6 +199,19 @@ async def _create_one(
         mf = await _auto_parcels(owner, order, per_product_override=per_prod)
         if mf:
             pack["parcels"] = mf
+    # Ultimul fallback = harta CENTRALĂ SKU→cutii (`sku_box_map`, ex. HA-0047 = 1 colet/bucată), calculată
+    # LIVE ca în cron. Fără ea, o comandă a cărei valoare n-a fost memorată (comandă veche, sau detectorul
+    # n-a apucat să ruleze) pleca cu 1 colet deși are 3 — tăcut. Ordinea: override explicit > parcel_count
+    # per comandă (metafield depozit) > reguli de packing ale magazinului > hartă SKU > 1.
+    if (pack.get("parcels") is None and not getattr(order, "parcel_count", None)
+            and "parcels_count" not in explicit):
+        try:
+            from services.cron_parity import parcels as _p
+            n_map = _p.parcel_count(order, await _p._box_map(db))
+            if n_map and n_map > 1:
+                pack["parcels"] = n_map
+        except Exception as e:
+            logger.info("sku_box_map fallback a picat pt %s: %s", getattr(order, "name", "?"), e)
     packing.apply_to_options(opts, pack, skip=explicit)
     opts.setdefault("parcels_count", 1)
     opts.setdefault("total_weight", 1.0)
