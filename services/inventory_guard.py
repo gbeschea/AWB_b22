@@ -227,37 +227,45 @@ async def run_once() -> Dict[str, Any]:
             name = info.get("name") or sku
             per_store = info.get("stores") or {}
 
-            # Ce verificăm pentru produsul ăsta: (cheie, etichetă, cantitate, prag, destinatari-extra)
+            # UN SINGUR nivel de măsurare per produs — cel mai specific care are regulă. O regulă
+            # specială ÎNLOCUIEȘTE regula generală pentru ce acoperă; altfel un produs cu regulă pe
+            # Grandia ar apărea și în alerta pe total, iar aceiași oameni ar primi de două ori
+            # același produs, cu două cifre diferite (felia vs grupul) — confuz și inutil.
+            # Precedență: magazin > categorie > total.
             checks = []
 
-            # 1. TOTALUL din grup — pragul produsului dacă are regulă proprie, altfel cel implicit
-            r_tot = _pick(rules, sku, store=None, category=None)
-            checks.append(("total", None, int(info["total"]),
-                           default_thr if r_tot is None else r_tot["threshold"],
-                           (r_tot or {}).get("recipients") or []))
-
-            # 2. CATEGORII — suma feliilor magazinelor din categorie. O categorie se măsoară ca GRUP,
-            #    nu magazin cu magazin: altfel „parfumuri sub 50" ar da 4 alerte pentru același produs.
-            for cname, cdef in cats.items():
-                if cdef["skus"] and sku not in cdef["skus"]:
-                    continue                      # categoria acoperă produse anume, ăsta nu e printre ele
-                r_cat = _pick(rules, sku, store=None, category=cname)
-                if r_cat is None:
-                    continue                      # categoria există, dar n-are regulă → nu verificăm
-                members = [s for s in cdef["stores"]] or list(per_store.keys())
-                qty = sum(per_store.get(m, 0) for m in members)
-                if not any(m in per_store for m in members):
-                    continue                      # produsul nu se vinde pe magazinele categoriei
-                checks.append(("cat:" + cname, cname, int(qty), r_cat["threshold"],
-                               r_cat.get("recipients") or []))
-
-            # 3. MAGAZINE — doar unde merchantul a scris o regulă anume pe magazinul ăla.
+            # 1. MAGAZINE — doar unde merchantul a scris o regulă anume pe magazinul ăla. Dacă a
+            #    scris pentru mai multe magazine, fiecare e o alertă separată: sunt locuri fizice
+            #    diferite, iar una nu spune nimic despre cealaltă.
             for store_label, qty in per_store.items():
                 r_st = _pick(rules, sku, store=store_label, category=None)
                 if r_st is None:
                     continue
                 checks.append((store_label, store_label, int(qty), r_st["threshold"],
                                r_st.get("recipients") or []))
+
+            # 2. CATEGORII — suma feliilor magazinelor din categorie. O categorie se măsoară ca GRUP,
+            #    nu magazin cu magazin: altfel „parfumuri sub 50" ar da 4 alerte pentru același produs.
+            if not checks:
+                for cname, cdef in cats.items():
+                    if cdef["skus"] and sku not in cdef["skus"]:
+                        continue                  # categoria acoperă produse anume, ăsta nu e printre ele
+                    r_cat = _pick(rules, sku, store=None, category=cname)
+                    if r_cat is None:
+                        continue                  # categoria există, dar n-are regulă → nu verificăm
+                    members = [m for m in cdef["stores"]] or list(per_store.keys())
+                    if not any(m in per_store for m in members):
+                        continue                  # produsul nu se vinde pe magazinele categoriei
+                    qty = sum(per_store.get(m, 0) for m in members)
+                    checks.append(("cat:" + cname, cname, int(qty), r_cat["threshold"],
+                                   r_cat.get("recipients") or []))
+
+            # 3. TOTALUL din grup — plasa de siguranță, doar dacă nimic mai specific nu l-a prins.
+            if not checks:
+                r_tot = _pick(rules, sku, store=None, category=None)
+                checks.append(("total", None, int(info["total"]),
+                               default_thr if r_tot is None else r_tot["threshold"],
+                               (r_tot or {}).get("recipients") or []))
 
             for key_scope, label, qty, thr, extra in checks:
                 key = "%s|%s" % (key_scope, sku)

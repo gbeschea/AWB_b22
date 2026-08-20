@@ -133,8 +133,10 @@ export function InventoryGuardCard() {
         <BlockStack gap="200">
           <Text as="h3" variant="headingSm">Reguli speciale</Text>
           <Text as="p" tone="subdued" variant="bodySm">
-            Peste pragul general. Alege UN nivel de măsurare: fără magazin/categorie = stocul TOTAL
-            din grup · categorie = suma magazinelor din ea · magazin = stocul acelui magazin.
+            O regulă specială ÎNLOCUIEȘTE pragul general pentru ce acoperă — un produs nu apare de
+            două ori. Precedență: magazin &gt; categorie &gt; total. Măsura diferă pe fiecare nivel:
+            magazin = stocul acelui magazin · categorie = suma magazinelor din ea · nimic ales =
+            stocul TOTAL din grup.
             Poți lipi oricâte SKU-uri într-o regulă — toate primesc același prag. Gol = toate produsele. „În plus la" = cine primește pe lângă destinatarii
             generali, doar pentru ce prinde regula asta.
           </Text>
