@@ -16,7 +16,10 @@ export function InventoryGuardCard() {
   const [running, setRunning] = useState(false);
   const [stores, setStores] = useState<string[]>([]);
 
-  useEffect(() => { getInventoryGuard().then(setCfg).catch(() => setCfg(null)); }, []);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    getInventoryGuard().then(setCfg).catch((e) => setLoadError((e as Error).message || "eroare"));
+  }, []);
   useEffect(() => {
     getOverviewStores()
       .then((r) => setStores((r as unknown as { stores?: { name?: string; domain?: string }[] })
@@ -46,7 +49,18 @@ export function InventoryGuardCard() {
     finally { setRunning(false); }
   }, []);
 
-  if (!cfg) return null;
+  // Fără asta, cardul DISPĂREA în tăcere dacă apelul eșua — te uitai în Settings și pur și simplu
+  // nu era acolo, fără niciun indiciu de ce.
+  if (!cfg) {
+    return (
+      <Card><BlockStack gap="200">
+        <Text as="h2" variant="headingMd">Gardă de stoc</Text>
+        <Text as="p" tone={loadError ? "critical" : "subdued"}>
+          {loadError ? `Nu s-au putut încărca setările: ${loadError}` : "Se încarcă…"}
+        </Text>
+      </BlockStack></Card>
+    );
+  }
 
   return (
     <Card>

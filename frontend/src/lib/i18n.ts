@@ -85,6 +85,7 @@ const STR: Record<string, { en?: string; ro: string }> = {
   "sched.saved": { en: "Schedule saved", ro: "Programare salvată" },
   "sched.savefail": { en: "Couldn't save", ro: "Nu s-a putut salva" },
   "sched.mode": { en: "Mode", ro: "Mod" },
+  "sched.min": { ro: "min", en: "min" },
   "sched.every": { en: "Every (min)", ro: "Interval (min)" },
   "sched.after": { en: "Min. after order", ro: "Min. după comandă" },
   "mode.on_order": { en: "On order", ro: "La comandă" },

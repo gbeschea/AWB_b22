@@ -76,7 +76,8 @@ export function AutomationScheduleCard() {
         {AUTOMATIONS.map((a) => {
           const entry = cfg[a.key] as { mode: string; minutes: number };
           return (
-            <InlineGrid key={a.key} columns={{ xs: 1, sm: 3 }} gap="300">
+            <InlineGrid key={a.key} columns={{ xs: 1, sm: "2fr 1fr 200px" }} gap="300"
+              alignItems="center">
               <BlockStack gap="050">
                 <Text as="span" variant="bodyMd" fontWeight="semibold">{a.label}</Text>
                 <Text as="span" tone="subdued" variant="bodySm">{a.help}</Text>
@@ -84,9 +85,17 @@ export function AutomationScheduleCard() {
               <Select label={t("sched.mode")} labelHidden
                 options={a.modes.map((m) => ({ label: MODE_LABEL[m], value: m }))}
                 value={entry.mode} onChange={(v) => setEntry(a.key, { mode: v })} />
-              <TextField label={minutesLabel(entry.mode)} type="number" autoComplete="off"
-                value={String(entry.minutes ?? 0)} disabled={minutesDisabled(entry.mode)}
-                onChange={(v) => setEntry(a.key, { minutes: Number(v) || 0 })} />
+              {/* Câmpul de minute apare DOAR unde are sens. Înainte rămânea vizibil și dezactivat,
+                  cu eticheta „—" și un 0 mort (ex. „la livrare"), și ocupa o treime din rând
+                  pentru un număr de o cifră. */}
+              {minutesDisabled(entry.mode) ? <div /> : (
+                <div style={{ width: 148 }}>
+                  <TextField label={minutesLabel(entry.mode)} type="number" autoComplete="off"
+                    suffix={t("sched.min")}
+                    value={String(entry.minutes ?? 0)}
+                    onChange={(v) => setEntry(a.key, { minutes: Number(v) || 0 })} />
+                </div>
+              )}
             </InlineGrid>
           );
         })}
