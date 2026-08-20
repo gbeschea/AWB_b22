@@ -6,7 +6,7 @@ import json
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -48,6 +48,36 @@ app = FastAPI(
     description="Aplicatie pentru managementul comenzilor și generarea de AWB-uri.",
     version="1.0.0"
 )
+
+
+# ── Frână pe webhook-uri ────────────────────────────────────────────────────────────────────────
+# Webhook-urile se procesează SINCRON (intenționat — vezi routes/webhooks.py: un eșec trebuie să
+# ajungă în răspuns, ca Shopify să reîncerce). Dar erau și NELIMITATE ca număr simultan, iar fiecare
+# ține o sesiune de bază de date pe toată durata lui. La rafală, asta umple ORICE pool — pe 20-aug
+# aplicația a devenit inaccesibilă, iar mărirea pool-ului de la 30 la 50 s-a saturat identic în
+# câteva secunde: nu era o problemă de dimensiune, ci de concurență.
+#
+# Mai rău, se auto-întreținea: pool plin → handler pică → 500 → Shopify REÎNCEARCĂ → mai multe
+# webhook-uri. Frâna se pune ÎNAINTE de dependențe, altfel sesiunea e deja deschisă când așteptăm.
+# Peste limită răspundem 503, nu 500: tot retryable, dar spune adevărul (suntem ocupați) și lasă
+# handler-ele libere să termine.
+_WEBHOOK_SEM = asyncio.Semaphore(int(os.environ.get("WEBHOOK_CONCURRENCY", "8")))
+_WEBHOOK_WAIT_S = float(os.environ.get("WEBHOOK_WAIT_SEC", "15"))
+
+
+@app.middleware("http")
+async def _bound_webhook_concurrency(request, call_next):
+    if not request.url.path.startswith("/webhooks"):
+        return await call_next(request)
+    try:
+        await asyncio.wait_for(_WEBHOOK_SEM.acquire(), timeout=_WEBHOOK_WAIT_S)
+    except asyncio.TimeoutError:
+        logger.warning("webhook throttle: %s respins cu 503 (prea multe simultan)", request.url.path)
+        return Response(status_code=503, content="Busy; please retry.")
+    try:
+        return await call_next(request)
+    finally:
+        _WEBHOOK_SEM.release()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

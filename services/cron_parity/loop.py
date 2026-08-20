@@ -49,6 +49,10 @@ async def _pass_once() -> None:
 
 
 async def run_forever() -> None:
+    # Pornire ESCALONATĂ: bucla asta făcea o trecere completă în aceeași secundă în care serverul
+    # prelua rafala de webhook-uri de după repornire — două consumatoare mari de conexiuni peste
+    # același pool, exact când e mai fragil. 45s le desparte.
+    await asyncio.sleep(45)
     logger.info("cron-parity SHADOW loop pornit (interval=%ss)", INTERVAL_S)
     while True:
         try:
