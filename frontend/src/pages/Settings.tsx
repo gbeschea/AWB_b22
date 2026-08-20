@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { InventoryGuardCard } from "../components/InventoryGuardCard";
 import { useSearchParams } from "react-router-dom";
 import { COACH_KEY } from "../components/TestModeCoach";
 import { useLang } from "../lib/i18n";
@@ -1533,7 +1534,7 @@ export default function Settings() {
       body: <BlockStack gap="400">{courierAccountsCard}{courierMappingsCard}</BlockStack> },
     { id: "shipping", content: "Shipping",
       body: <BlockStack gap="400"><ShipmentProfilesCard /><PackingCard /><ShipmentRulesCard /></BlockStack> },
-    { id: "automation", content: "Automation", body: <BlockStack gap="400"><AutomationCard /><AutomationScheduleCard /></BlockStack> },
+    { id: "automation", content: "Automation", body: <BlockStack gap="400"><AutomationCard /><AutomationScheduleCard /><InventoryGuardCard /></BlockStack> },
     { id: "invoicing", content: "Invoicing", body: <InvoiceSettingsCard /> },
     { id: "organization", content: "Organization", body: <OrganizationCard /> },
     { id: "testing", content: "Test mode", body: <TestModeCard /> },

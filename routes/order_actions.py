@@ -139,6 +139,63 @@ async def put_invoice_settings(
     return {"success": True, "invoice_settings": store.invoice_settings}
 
 
+@router.get("/inventory-guard")
+async def get_inventory_guard(db: AsyncSession = Depends(get_db),
+                              store: models.Store = Depends(require_shop)):
+    """Setările gărzii de stoc (nivel organizație — stocul e comun, nu per magazin)."""
+    from services import inventory_guard, mailer
+    from sqlalchemy import text as _t
+    row = (await db.execute(_t(
+        "select settings from hub_settings where store_id is null and organization_id is null limit 1"
+    ))).scalar()
+    cfg = dict(inventory_guard.DEFAULTS)
+    cfg.update(((row or {}).get("inventory_guard") or {}) if isinstance(row, dict) else {})
+    cfg["smtp_ready"] = mailer.configured()
+    return cfg
+
+
+@router.put("/inventory-guard")
+async def put_inventory_guard(payload: Dict[str, Any] = Body(default={}),
+                              db: AsyncSession = Depends(get_db),
+                              store: models.Store = Depends(require_shop)):
+    from services import inventory_guard
+    from sqlalchemy import text as _t
+    clean: Dict[str, Any] = {}
+    if isinstance(payload.get("enabled"), bool):
+        clean["enabled"] = payload["enabled"]
+    for k in ("threshold", "hysteresis_pct"):
+        if k in payload:
+            try:
+                clean[k] = max(0, int(payload[k]))
+            except Exception:
+                pass
+    if "recipients" in payload:
+        raw = payload["recipients"]
+        lst = raw if isinstance(raw, list) else str(raw or "").replace(";", ",").split(",")
+        clean["recipients"] = [a.strip() for a in lst if a and "@" in str(a)]
+    row = (await db.execute(_t(
+        "select settings from hub_settings where store_id is null and organization_id is null limit 1"
+    ))).scalar()
+    cur = dict(row or {}) if isinstance(row, dict) else {}
+    cur["inventory_guard"] = {**(cur.get("inventory_guard") or {}), **clean}
+    await db.execute(_t("""
+        insert into hub_settings (organization_id, store_id, settings, updated_at)
+        values (null, null, cast(:s as jsonb), now())
+        on conflict do nothing"""), {"s": __import__("json").dumps(cur)})
+    await db.execute(_t("""
+        update hub_settings set settings = cast(:s as jsonb), updated_at = now()
+        where store_id is null and organization_id is null"""), {"s": __import__("json").dumps(cur)})
+    await db.commit()
+    return {"success": True, **{**dict(inventory_guard.DEFAULTS), **cur["inventory_guard"]}}
+
+
+@router.post("/inventory-guard/run")
+async def run_inventory_guard(store: models.Store = Depends(require_shop)):
+    """Rulează garda ACUM (pentru test din interfață)."""
+    from services import inventory_guard
+    return await inventory_guard.run_once()
+
+
 @router.get("/automation-schedule")
 async def get_automation_schedule(store: models.Store = Depends(require_shop)):
     """Programarea EFECTIVĂ a automatizărilor (defaults + override magazin) — pt UI."""

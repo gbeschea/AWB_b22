@@ -289,6 +289,22 @@ _GHOST_EVERY_SEC = float(os.environ.get("GHOST_RECONCILE_INTERVAL_SEC", str(6 * 
 _ghost_next_at = 0.0
 
 
+_INV_EVERY_SEC = float(os.environ.get("INVENTORY_GUARD_INTERVAL_SEC", str(3 * 3600)))
+_inv_next_at = 0.0
+
+
+async def _maybe_inventory_guard() -> None:
+    global _inv_next_at
+    now = _time.monotonic()
+    if now < _inv_next_at:
+        return
+    _inv_next_at = now + _INV_EVERY_SEC
+    from services import inventory_guard
+    res = await inventory_guard.run_once()
+    if res.get("new_alerts") or res.get("cleared"):
+        logger.info("inventory-guard: %s", res)
+
+
 async def _maybe_reconcile_ghosts() -> None:
     """Rulează reconcilierea fantomelor cel mult o dată la `_GHOST_EVERY_SEC`. Prima trecere se face
     la scurt timp după pornire (contorul începe de la 0) ca un restart să nu amâne recuperarea cu 6h."""
@@ -335,6 +351,12 @@ async def poll_loop(interval_sec: int) -> None:
                             await cs_queue_janitor.close_moot_items()
                         except Exception:
                             logger.exception("cs-janitor pass failed")
+                        # Garda de stoc — rar (3h implicit), alertele sunt pentru reaprovizionare,
+                        # nu pentru reacție în minute.
+                        try:
+                            await _maybe_inventory_guard()
+                        except Exception:
+                            logger.exception("inventory-guard pass failed")
                     finally:
                         await conn.execute(
                             text("SELECT pg_advisory_unlock(:k)"), {"k": _ADVISORY_LOCK_KEY}

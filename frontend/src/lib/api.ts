@@ -1152,6 +1152,22 @@ export function saveAutomationSchedule(s: Partial<AutomationSchedule>) {
     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s),
   });
 }
+export type InventoryGuard = {
+  enabled: boolean; threshold: number; recipients: string[];
+  hysteresis_pct: number; smtp_ready?: boolean;
+};
+export function getInventoryGuard() {
+  return authFetch<InventoryGuard>(`/api/inventory-guard`);
+}
+export function saveInventoryGuard(c: Partial<InventoryGuard>) {
+  return authFetch<{ success: boolean }>(`/api/inventory-guard`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(c),
+  });
+}
+export function runInventoryGuard() {
+  return authFetch<{ checked?: number; low?: number; new_alerts?: number; baseline?: number }>(
+    `/api/inventory-guard/run`, { method: "POST" });
+}
 export function getSmartbillSeries() {
   return authFetch<{ configured: boolean; series: { name: string; next: string | number }[]; error?: string }>(
     `/api/smartbill/series`);

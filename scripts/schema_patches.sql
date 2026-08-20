@@ -72,3 +72,15 @@ CREATE INDEX IF NOT EXISTS ix_shipments_last_poll_at ON shipments (last_poll_at)
 -- `order_hub`) primește „permission denied" — capcană deja plătită o dată cu hub_settings/blocklist.
 -- Orice tabelă nouă are nevoie de linia asta.
 ALTER TABLE awb_fail_counts OWNER TO order_hub;
+
+-- Garda de stoc: o linie per SKU aflat sub prag. `cleared_at` marchează re-armarea (stocul a urcat
+-- înapoi peste prag + marjă), deci nu trimitem al doilea mail pentru aceeași cădere.
+CREATE TABLE IF NOT EXISTS inventory_alerts (
+    sku         text PRIMARY KEY,
+    name        text,
+    qty         integer,
+    threshold   integer,
+    alerted_at  timestamptz NOT NULL DEFAULT now(),
+    cleared_at  timestamptz
+);
+CREATE INDEX IF NOT EXISTS ix_inventory_alerts_open ON inventory_alerts (cleared_at) WHERE cleared_at IS NULL;
