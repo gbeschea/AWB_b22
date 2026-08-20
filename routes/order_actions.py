@@ -173,6 +173,8 @@ async def put_inventory_guard(payload: Dict[str, Any] = Body(default={}),
         clean["rules"] = inventory_guard.sanitize_rules(payload["rules"])
     if "categories" in payload:
         clean["categories"] = inventory_guard.sanitize_categories(payload["categories"])
+    if "exclusions" in payload:
+        clean["exclusions"] = inventory_guard.sanitize_exclusions(payload["exclusions"])
     if "recipients" in payload:
         raw = payload["recipients"]
         lst = raw if isinstance(raw, list) else str(raw or "").replace(";", ",").split(",")

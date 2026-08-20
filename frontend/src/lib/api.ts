@@ -1153,13 +1153,15 @@ export function saveAutomationSchedule(s: Partial<AutomationSchedule>) {
   });
 }
 export type InventoryRule = {
-  store: string; category: string; skus: string[]; threshold: number; recipients: string[];
+  store: string; category: string; skus: string[]; threshold: number;
+  recipients: string[]; exclude_recipients: string[];
 };
+export type InventoryExclusion = { store: string; category: string; skus: string[] };
 export type InventoryCategory = { name: string; stores: string[]; skus: string[] };
 export type InventoryGuard = {
   enabled: boolean; threshold: number; recipients: string[];
   hysteresis_pct: number; smtp_ready?: boolean;
-  rules?: InventoryRule[]; categories?: InventoryCategory[];
+  rules?: InventoryRule[]; categories?: InventoryCategory[]; exclusions?: InventoryExclusion[];
 };
 export function getInventoryGuard() {
   return authFetch<InventoryGuard>(`/api/inventory-guard`);

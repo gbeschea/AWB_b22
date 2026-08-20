@@ -36,7 +36,7 @@ from database import AsyncSessionLocal
 logger = logging.getLogger(__name__)
 
 DEFAULTS = {"enabled": False, "threshold": 50, "recipients": [], "hysteresis_pct": 20,
-            "rules": [], "categories": []}
+            "rules": [], "categories": [], "exclusions": []}
 _VARIANTS_Q = """
 query($cursor: String) {
   productVariants(first: 250, after: $cursor) {
@@ -136,7 +136,10 @@ def sanitize_rules(raw: Any) -> List[Dict[str, Any]]:
         if not store and not cat and not skus:
             continue          # o regulă fără țintă e pragul implicit, care se setează separat
         out.append({"store": store, "category": cat, "skus": skus, "threshold": thr,
-                    "recipients": _emails(r.get("recipients"))})
+                    "recipients": _emails(r.get("recipients")),
+                    # cine NU primește alertele regulii ăsteia, chiar dacă e destinatar general —
+                    # „Mihai primește tot, dar nu parfumurile"
+                    "exclude_recipients": _emails(r.get("exclude_recipients"))})
     return out
 
 
@@ -159,6 +162,75 @@ def sanitize_categories(raw: Any) -> List[Dict[str, Any]]:
         if nm and (stores or skus):
             out.append({"name": nm, "stores": stores, "skus": skus})
     return out
+
+
+def sanitize_exclusions(raw: Any) -> List[Dict[str, Any]]:
+    """Ce NU vrem urmărit: produse, magazine sau categorii.
+
+    O excludere TAIE ALERTA, nu schimbă cifra — stocul rămâne numărat în total, doar nu mai
+    generează notificare. Altfel, scoțând un magazin din sumă, totalul ar scădea și am produce MAI
+    multe alerte, exact pe dos față de ce a cerut merchantul.
+    """
+    out: List[Dict[str, Any]] = []
+    for e in (raw if isinstance(raw, list) else []):
+        if not isinstance(e, dict):
+            continue
+        store = (str(e.get("store") or "")).strip()
+        cat = (str(e.get("category") or "")).strip()
+        raw_skus = e.get("skus")
+        if isinstance(raw_skus, str):
+            raw_skus = raw_skus.replace(";", ",").replace("\n", ",").split(",")
+        skus = sorted({str(x).strip().lower() for x in (raw_skus or []) if str(x).strip()})
+        if store or cat or skus:
+            out.append({"store": store, "category": cat, "skus": skus})
+    return out
+
+
+def _recipients_for(base: List[str], extra: List[str], minus: List[str]) -> List[str]:
+    """Destinatarii generali + cei ai regulii − cei scoși de regulă.
+
+    Comparăm fără majuscule: adresele sunt scrise de mână în două locuri diferite, iar
+    „Mihai.lazar1987@…" și „mihai.lazar1987@…" sunt același om. Fără asta, excluderea ar părea
+    salvată corect și pur și simplu n-ar avea efect — genul de eșec care se vede abia din inbox.
+    """
+    out, seen = [], set()
+    drop = {m.strip().lower() for m in (minus or [])}
+    for a in list(base or []) + list(extra or []):
+        k = a.strip().lower()
+        if k in drop or k in seen:
+            continue
+        seen.add(k)
+        out.append(a)
+    return sorted(out, key=str.lower)
+
+
+def _excluded(excl: List[Dict[str, Any]], cats: Dict[str, Dict[str, List[str]]],
+              sku: str, level: str, label: Optional[str]) -> bool:
+    """True dacă alerta asta e tăiată de o excludere.
+
+    `level` = 'total' | 'cat:<nume>' | numele magazinului. O excludere pe PRODUSE îl taie peste tot;
+    una pe magazin taie doar verificările magazinului ăla; una pe categorie taie categoria, iar dacă
+    respectiva categorie enumeră produse, le taie pe alea peste tot (asta e ce înseamnă „exclude
+    categoria X" când X e o listă de produse).
+    """
+    for e in excl:
+        e_store, e_cat, e_skus = e.get("store") or "", e.get("category") or "", e.get("skus") or []
+        if e_store:
+            if label and e_store.lower() == label.lower() and (not e_skus or sku in e_skus):
+                return True
+            continue
+        if e_cat:
+            cd = cats.get(e_cat.lower()) or {}
+            if cd.get("skus") and sku in cd["skus"]:
+                return True                       # categorie de PRODUSE → tăiată peste tot
+            if level == "cat:" + e_cat.lower():
+                return True
+            if cd.get("stores") and label and label in cd["stores"]:
+                return True                       # categorie de MAGAZINE → tăiem și feliile lor
+            continue
+        if e_skus and sku in e_skus:
+            return True                           # produse, fără altă țintă → tăiate peste tot
+    return False
 
 
 def _category_map(cfg: Dict[str, Any]) -> Dict[str, Dict[str, List[str]]]:
@@ -220,6 +292,7 @@ async def run_once() -> Dict[str, Any]:
 
         rules = sanitize_rules(cfg.get("rules"))
         cats = _category_map(cfg)
+        excl = sanitize_exclusions(cfg.get("exclusions"))
         base_rcpt = _emails(cfg.get("recipients"))
 
         for sku, info in stock.items():
@@ -242,7 +315,7 @@ async def run_once() -> Dict[str, Any]:
                 if r_st is None:
                     continue
                 checks.append((store_label, store_label, int(qty), r_st["threshold"],
-                               r_st.get("recipients") or []))
+                               r_st.get("recipients") or [], r_st.get("exclude_recipients") or []))
 
             # 2. CATEGORII — suma feliilor magazinelor din categorie. O categorie se măsoară ca GRUP,
             #    nu magazin cu magazin: altfel „parfumuri sub 50" ar da 4 alerte pentru același produs.
@@ -258,16 +331,20 @@ async def run_once() -> Dict[str, Any]:
                         continue                  # produsul nu se vinde pe magazinele categoriei
                     qty = sum(per_store.get(m, 0) for m in members)
                     checks.append(("cat:" + cname, cname, int(qty), r_cat["threshold"],
-                                   r_cat.get("recipients") or []))
+                                   r_cat.get("recipients") or [],
+                                   r_cat.get("exclude_recipients") or []))
 
             # 3. TOTALUL din grup — plasa de siguranță, doar dacă nimic mai specific nu l-a prins.
             if not checks:
                 r_tot = _pick(rules, sku, store=None, category=None)
                 checks.append(("total", None, int(info["total"]),
                                default_thr if r_tot is None else r_tot["threshold"],
-                               (r_tot or {}).get("recipients") or []))
+                               (r_tot or {}).get("recipients") or [],
+                               (r_tot or {}).get("exclude_recipients") or []))
 
-            for key_scope, label, qty, thr, extra in checks:
+            for key_scope, label, qty, thr, extra, minus in checks:
+                if _excluded(excl, cats, sku, key_scope, label):
+                    continue
                 key = "%s|%s" % (key_scope, sku)
                 if qty < thr:
                     out["low"] += 1
@@ -282,7 +359,7 @@ async def run_once() -> Dict[str, Any]:
                          "q": qty, "t": thr, "now": now})
                     fresh.append({"name": name, "sku": sku, "qty": qty, "threshold": thr,
                                   "scope": label or "total",
-                                  "to": sorted(set(base_rcpt) | set(extra))})
+                                  "to": _recipients_for(base_rcpt, extra, minus)})
                     out["new_alerts"] += 1
                 elif key in known and qty >= thr * hyst:
                     await db.execute(text(

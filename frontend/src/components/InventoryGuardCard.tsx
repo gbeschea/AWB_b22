@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { BlockStack, Button, Card, Checkbox, InlineGrid, InlineStack, Select, Text, TextField, Banner } from "@shopify/polaris";
 import { getInventoryGuard, saveInventoryGuard, runInventoryGuard, getOverviewStores,
-         type InventoryGuard, type InventoryRule, type InventoryCategory } from "../lib/api";
+         type InventoryGuard, type InventoryRule, type InventoryCategory,
+         type InventoryExclusion } from "../lib/api";
 
 type Cfg = InventoryGuard;
 
@@ -31,6 +32,8 @@ export function InventoryGuardCard() {
     setCfg((c) => (c ? { ...c, rules: fn(c.rules ?? []) } : c));
   const setCats = (fn: (cs: InventoryCategory[]) => InventoryCategory[]) =>
     setCfg((c) => (c ? { ...c, categories: fn(c.categories ?? []) } : c));
+  const setExcl = (fn: (es: InventoryExclusion[]) => InventoryExclusion[]) =>
+    setCfg((c) => (c ? { ...c, exclusions: fn(c.exclusions ?? []) } : c));
 
   const save = useCallback(async () => {
     if (!cfg) return;
@@ -137,11 +140,11 @@ export function InventoryGuardCard() {
             două ori. Precedență: magazin &gt; categorie &gt; total. Măsura diferă pe fiecare nivel:
             magazin = stocul acelui magazin · categorie = suma magazinelor din ea · nimic ales =
             stocul TOTAL din grup.
-            Poți lipi oricâte SKU-uri într-o regulă — toate primesc același prag. Gol = toate produsele. „În plus la" = cine primește pe lângă destinatarii
-            generali, doar pentru ce prinde regula asta.
+            Poți lipi oricâte SKU-uri într-o regulă — toate primesc același prag. Gol = toate produsele. „În plus la" = cine primește pe lângă destinatarii generali · „Fără" = cine NU
+            primește regula asta, chiar dacă e destinatar general.
           </Text>
           {(cfg.rules ?? []).map((r, i) => (
-            <InlineGrid key={i} columns={{ xs: 1, sm: "1.1fr 1.1fr 2fr 0.6fr 1.5fr auto" }} gap="200">
+            <InlineGrid key={i} columns={{ xs: 1, sm: "1fr 1fr 1.8fr 0.5fr 1.3fr 1.3fr auto" }} gap="200">
               <Select label="Magazin" labelHidden
                 options={[{ label: "— magazin —", value: "" },
                           ...stores.map((s) => ({ label: s, value: s }))]}
@@ -162,17 +165,55 @@ export function InventoryGuardCard() {
               <TextField label="Prag" labelHidden type="number" autoComplete="off" placeholder="prag"
                 value={String(r.threshold)}
                 onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, threshold: Number(v) || 0 } : x)))} />
-              <TextField label="În plus la" labelHidden autoComplete="off" placeholder="email-uri în plus"
+              <TextField label="În plus la" labelHidden autoComplete="off" placeholder="+ email-uri"
                 value={(r.recipients || []).join(", ")}
                 onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i
                   ? { ...x, recipients: v.split(",").map((e) => e.trim()).filter(Boolean) } : x)))} />
+              <TextField label="Fără" labelHidden autoComplete="off" placeholder="− email-uri (scoase)"
+                value={(r.exclude_recipients || []).join(", ")}
+                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i
+                  ? { ...x, exclude_recipients: v.split(",").map((e) => e.trim()).filter(Boolean) } : x)))} />
               <Button variant="tertiary" tone="critical"
                 onClick={() => setRules((rs) => rs.filter((_, j) => j !== i))}>Șterge</Button>
             </InlineGrid>
           ))}
           <InlineStack>
-            <Button onClick={() => setRules((rs) => [...rs, { store: "", category: "", skus: [], threshold: cfg.threshold ?? 50, recipients: [] }])}>
+            <Button onClick={() => setRules((rs) => [...rs, { store: "", category: "", skus: [], threshold: cfg.threshold ?? 50, recipients: [], exclude_recipients: [] }])}>
               Adaugă regulă
+            </Button>
+          </InlineStack>
+        </BlockStack>
+
+        <BlockStack gap="200">
+          <Text as="h3" variant="headingSm">Excluse de la gardă</Text>
+          <Text as="p" tone="subdued" variant="bodySm">
+            Produse, magazine sau categorii pentru care nu vrei alerte. Excluderea taie alerta, nu
+            schimbă cifra — stocul rămâne numărat în total.
+          </Text>
+          {(cfg.exclusions ?? []).map((e, i) => (
+            <InlineGrid key={i} columns={{ xs: 1, sm: "1fr 1fr 2fr auto" }} gap="200">
+              <Select label="Magazin" labelHidden
+                options={[{ label: "— magazin —", value: "" },
+                          ...stores.map((s) => ({ label: s, value: s }))]}
+                value={e.store}
+                onChange={(v) => setExcl((es) => es.map((x, j) => (j === i ? { ...x, store: v } : x)))} />
+              <Select label="Categorie" labelHidden
+                options={[{ label: "— categorie —", value: "" },
+                          ...(cfg.categories ?? []).map((c) => ({ label: c.name, value: c.name }))]}
+                value={e.category}
+                onChange={(v) => setExcl((es) => es.map((x, j) => (j === i ? { ...x, category: v } : x)))} />
+              <TextField label="Produse" labelHidden autoComplete="off"
+                placeholder="SKU-uri (lipește oricâte)"
+                value={(e.skus || []).join(", ")}
+                onChange={(v) => setExcl((es) => es.map((x, j) => (j === i
+                  ? { ...x, skus: v.split(/[,;\n]/).map((z) => z.trim()).filter(Boolean) } : x)))} />
+              <Button variant="tertiary" tone="critical"
+                onClick={() => setExcl((es) => es.filter((_, j) => j !== i))}>Șterge</Button>
+            </InlineGrid>
+          ))}
+          <InlineStack>
+            <Button onClick={() => setExcl((es) => [...es, { store: "", category: "", skus: [] }])}>
+              Adaugă excludere
             </Button>
           </InlineStack>
         </BlockStack>
