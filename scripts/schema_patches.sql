@@ -73,10 +73,12 @@ CREATE INDEX IF NOT EXISTS ix_shipments_last_poll_at ON shipments (last_poll_at)
 -- Orice tabelă nouă are nevoie de linia asta.
 ALTER TABLE awb_fail_counts OWNER TO order_hub;
 
--- Garda de stoc: o linie per SKU aflat sub prag. `cleared_at` marchează re-armarea (stocul a urcat
--- înapoi peste prag + marjă), deci nu trimitem al doilea mail pentru aceeași cădere.
+-- Garda de stoc. Cheia include SCOPUL ('total|sku' sau 'Magazin|sku'): o alertă pe totalul din grup
+-- nu are voie să tacă una pe felia unui magazin, și invers. `cleared_at` marchează re-armarea.
 CREATE TABLE IF NOT EXISTS inventory_alerts (
-    sku         text PRIMARY KEY,
+    key         text PRIMARY KEY,
+    sku         text NOT NULL,
+    store       text,
     name        text,
     qty         integer,
     threshold   integer,

@@ -169,6 +169,8 @@ async def put_inventory_guard(payload: Dict[str, Any] = Body(default={}),
                 clean[k] = max(0, int(payload[k]))
             except Exception:
                 pass
+    if "rules" in payload:
+        clean["rules"] = inventory_guard.sanitize_rules(payload["rules"])
     if "recipients" in payload:
         raw = payload["recipients"]
         lst = raw if isinstance(raw, list) else str(raw or "").replace(";", ",").split(",")

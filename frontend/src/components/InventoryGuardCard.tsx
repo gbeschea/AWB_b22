@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { BlockStack, Button, Card, Checkbox, InlineStack, Text, TextField, Banner } from "@shopify/polaris";
-import { getInventoryGuard, saveInventoryGuard, runInventoryGuard, type InventoryGuard } from "../lib/api";
+import { BlockStack, Button, Card, Checkbox, InlineGrid, InlineStack, Select, Text, TextField, Banner } from "@shopify/polaris";
+import { getInventoryGuard, saveInventoryGuard, runInventoryGuard, getOverviewStores,
+         type InventoryGuard, type InventoryRule } from "../lib/api";
 
 type Cfg = InventoryGuard;
 
@@ -13,8 +14,18 @@ export function InventoryGuardCard() {
   const [cfg, setCfg] = useState<Cfg | null>(null);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
+  const [stores, setStores] = useState<string[]>([]);
 
   useEffect(() => { getInventoryGuard().then(setCfg).catch(() => setCfg(null)); }, []);
+  useEffect(() => {
+    getOverviewStores()
+      .then((r) => setStores((r as unknown as { stores?: { name?: string; domain?: string }[] })
+        .stores?.map((s) => s.name || s.domain || "").filter(Boolean) ?? []))
+      .catch(() => setStores([]));
+  }, []);
+
+  const setRules = (fn: (rs: InventoryRule[]) => InventoryRule[]) =>
+    setCfg((c) => (c ? { ...c, rules: fn(c.rules ?? []) } : c));
 
   const save = useCallback(async () => {
     if (!cfg) return;
@@ -70,6 +81,36 @@ export function InventoryGuardCard() {
             onChange={(v) => setCfg({ ...cfg, hysteresis_pct: Number(v) || 0 })}
             helpText="Alertă nouă doar după ce stocul urcă peste prag + marja asta." />
         </InlineStack>
+
+        <BlockStack gap="200">
+          <Text as="h3" variant="headingSm">Reguli speciale</Text>
+          <Text as="p" tone="subdued" variant="bodySm">
+            Peste pragul general. Fără magazin = pragul se aplică pe stocul TOTAL al produsului din grup.
+            Cu magazin = se aplică pe stocul acelui magazin. Regula cu produs bate regula pe magazin.
+          </Text>
+          {(cfg.rules ?? []).map((r, i) => (
+            <InlineGrid key={i} columns={{ xs: 1, sm: 4 }} gap="200">
+              <Select label="Magazin" labelHidden
+                options={[{ label: "Toate (stoc total)", value: "" },
+                          ...stores.map((s) => ({ label: s, value: s }))]}
+                value={r.store}
+                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, store: v } : x)))} />
+              <TextField label="SKU" labelHidden autoComplete="off" placeholder="SKU (gol = toate)"
+                value={r.sku}
+                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, sku: v } : x)))} />
+              <TextField label="Prag" labelHidden type="number" autoComplete="off" placeholder="prag"
+                value={String(r.threshold)}
+                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, threshold: Number(v) || 0 } : x)))} />
+              <Button variant="tertiary" tone="critical"
+                onClick={() => setRules((rs) => rs.filter((_, j) => j !== i))}>Șterge</Button>
+            </InlineGrid>
+          ))}
+          <InlineStack>
+            <Button onClick={() => setRules((rs) => [...rs, { store: "", sku: "", threshold: cfg.threshold ?? 50 }])}>
+              Adaugă regulă
+            </Button>
+          </InlineStack>
+        </BlockStack>
 
         <TextField label="Destinatari" autoComplete="off" multiline={2}
           placeholder="achizitii@arona.ro, depozit@arona.ro"

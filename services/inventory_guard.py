@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
@@ -35,7 +35,7 @@ from database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
-DEFAULTS = {"enabled": False, "threshold": 50, "recipients": [], "hysteresis_pct": 20}
+DEFAULTS = {"enabled": False, "threshold": 50, "recipients": [], "hysteresis_pct": 20, "rules": []}
 _VARIANTS_Q = """
 query($cursor: String) {
   productVariants(first: 250, after: $cursor) {
@@ -57,8 +57,12 @@ async def _settings(db) -> Dict[str, Any]:
 
 
 async def _stock_by_sku() -> Dict[str, Dict[str, Any]]:
-    """{sku: {qty, name}} — suma stocului pe TOATE magazinele Shopify active. Produsele draft/archived
-    și variantele fără SKU sunt sărite."""
+    """{sku: {name, total, stores:{nume_magazin: qty}}} — stocul pe magazinele Shopify active.
+
+    Păstrăm ȘI defalcarea pe magazine, nu doar totalul, fiindcă o regulă „per magazin" nu se poate
+    măsura pe total: stocul e împărțit în felii, iar felia magazinului e singurul lucru care are
+    sens acolo (dacă MagDeal a rămas cu 5 bucăți, contează, chiar dacă în grup mai sunt 500).
+    """
     from sqlalchemy import select as _sel
     from services import shopify_service
     import models as _m
@@ -70,6 +74,7 @@ async def _stock_by_sku() -> Dict[str, Dict[str, Any]]:
             ~_m.Store.domain.like("%orderhub-test.invalid"),
             ~_m.Store.domain.like("test-%")))).scalars().all()
     for st in stores:
+        label = st.name or st.domain
         cursor = None
         for _ in range(_MAX_PAGES):
             try:
@@ -86,13 +91,65 @@ async def _stock_by_sku() -> Dict[str, Dict[str, Any]]:
                     continue
                 if str(prod.get("status") or "").upper() in ("DRAFT", "ARCHIVED"):
                     continue
-                e = out.setdefault(sku, {"qty": 0, "name": prod.get("title") or sku})
-                e["qty"] += int(qty)
+                e = out.setdefault(sku, {"total": 0, "name": prod.get("title") or sku, "stores": {}})
+                e["total"] += int(qty)
+                e["stores"][label] = e["stores"].get(label, 0) + int(qty)
             info = pv.get("pageInfo") or {}
             if not info.get("hasNextPage"):
                 break
             cursor = info.get("endCursor")
     return out
+
+
+def sanitize_rules(raw: Any) -> List[Dict[str, Any]]:
+    """Curăță regulile venite din UI: {store?, sku?, threshold}. `store`/`sku` goale = „oricare"."""
+    out: List[Dict[str, Any]] = []
+    for r in (raw if isinstance(raw, list) else []):
+        if not isinstance(r, dict):
+            continue
+        try:
+            thr = int(r.get("threshold"))
+        except Exception:
+            continue
+        if thr < 0:
+            continue
+        store = (str(r.get("store") or "")).strip()
+        sku = (str(r.get("sku") or "")).strip().lower()
+        if not store and not sku:
+            continue          # o regulă fără țintă e pragul implicit, care se setează separat
+        out.append({"store": store, "sku": sku, "threshold": thr})
+    return out
+
+
+def _store_rule(rules: List[Dict[str, Any]], sku: str, store: str) -> Optional[int]:
+    """Pragul pentru FELIA unui magazin — DOAR din reguli care numesc explicit magazinul.
+
+    Fără regulă explicită nu alertăm per magazin. Altfel, un produs împărțit în 8 felii mici ar
+    declanșa 8 alerte pentru marfă care, în grup, e suficientă — exact zgomotul pe care garda
+    trebuie să-l evite. Între regulile care numesc magazinul, cea cu produs bate cea generală.
+    """
+    best, best_rank = None, -1
+    for r in rules:
+        r_store, r_sku = (r.get("store") or ""), (r.get("sku") or "")
+        if not r_store or r_store.lower() != (store or "").lower():
+            continue
+        if r_sku and r_sku != sku:
+            continue
+        rank = 1 if r_sku else 0
+        if rank > best_rank:
+            best, best_rank = r["threshold"], rank
+    return best
+
+
+def _rule_for(rules: List[Dict[str, Any]], sku: str, store: Optional[str]) -> Optional[int]:
+    """Pragul pe TOTALUL din grup: doar reguli care vizează produsul, fără magazin.
+    O regulă cu magazin nu se aplică pe total — acolo felia magazinului e unitatea de măsură."""
+    for r in rules:
+        if (r.get("store") or ""):
+            continue
+        if (r.get("sku") or "") == sku:
+            return r["threshold"]
+    return None
 
 
 async def run_once() -> Dict[str, Any]:
@@ -111,32 +168,60 @@ async def run_once() -> Dict[str, Any]:
         # s-ar pierde în el. Deci la prima rulare doar ÎNREGISTRĂM starea, fără email.
         seeding = not (await db.execute(text("select 1 from inventory_alerts limit 1"))).first()
         hyst = 1 + (float(cfg.get("hysteresis_pct") or 0) / 100.0)
-        thr = int(cfg.get("threshold") or 50)
+        default_thr = int(cfg.get("threshold") or 50)
         known = {r[0] for r in (await db.execute(text(
-            "select sku from inventory_alerts where cleared_at is null"))).all()}
+            "select key from inventory_alerts where cleared_at is null"))).all()}
         fresh: List[Dict[str, Any]] = []
         now = datetime.now(timezone.utc)
 
+        rules = sanitize_rules(cfg.get("rules"))
+
+        def _record(key, store_label, sku, name, qty, thr):
+            """Alertă nouă doar dacă nu e deja deschisă pe ACEEAȘI cheie. Cheia include magazinul,
+            ca o regulă pe MagDeal să nu tacă din cauza unei alerte deschise pe total (și invers)."""
+            if key in known:
+                return False
+            fresh.append({"name": name, "sku": sku, "qty": qty, "threshold": thr,
+                          "scope": store_label or "total"})
+            return True
+
         for sku, info in stock.items():
             out["checked"] += 1
-            qty = int(info["qty"])
-            if qty < thr:
-                out["low"] += 1
-                if sku in known:
-                    continue                     # deja alertat, încă sub prag → tăcere
-                await db.execute(text("""
-                    insert into inventory_alerts (sku, name, qty, threshold, alerted_at)
-                    values (:s, :n, :q, :t, :now)
-                    on conflict (sku) do update set qty = :q, threshold = :t,
-                        alerted_at = :now, cleared_at = null"""),
-                    {"s": sku, "n": (info.get("name") or "")[:300], "q": qty, "t": thr, "now": now})
-                fresh.append({"name": info.get("name") or sku, "sku": sku, "qty": qty, "threshold": thr})
-                out["new_alerts"] += 1
-            elif sku in known and qty >= thr * hyst:
-                # re-armare: a urcat peste prag CU MARJĂ, deci nu mai oscilează în jurul lui
-                await db.execute(text("update inventory_alerts set cleared_at = :now where sku = :s"),
-                                 {"now": now, "s": sku})
-                out["cleared"] += 1
+            name = info.get("name") or sku
+
+            # 1. pe TOTALUL din grup — pragul produsului dacă are regulă, altfel cel implicit
+            thr_total = _rule_for(rules, sku, None)
+            thr_total = default_thr if thr_total is None else thr_total
+            checks = [("total", None, int(info["total"]), thr_total)]
+
+            # 2. pe FELIA fiecărui magazin — DOAR dacă merchantul a scris o regulă pentru magazinul
+            #    ăla. Fără regulă explicită nu alertăm per magazin: altfel un produs împărțit în 8
+            #    felii mici ar declanșa 8 alerte pentru marfă care în grup e suficientă.
+            for store_label, qty in (info.get("stores") or {}).items():
+                thr_s = _store_rule(rules, sku, store_label)
+                if thr_s is not None:
+                    checks.append((store_label, store_label, int(qty), thr_s))
+
+            for key_scope, store_label, qty, thr in checks:
+                key = "%s|%s" % (key_scope, sku)
+                if qty < thr:
+                    out["low"] += 1
+                    if key in known:
+                        continue
+                    await db.execute(text("""
+                        insert into inventory_alerts (key, sku, store, name, qty, threshold, alerted_at)
+                        values (:k, :s, :st, :n, :q, :t, :now)
+                        on conflict (key) do update set qty = :q, threshold = :t,
+                            alerted_at = :now, cleared_at = null"""),
+                        {"k": key, "s": sku, "st": store_label, "n": name[:300],
+                         "q": qty, "t": thr, "now": now})
+                    _record(key, store_label, sku, name, qty, thr)
+                    out["new_alerts"] += 1
+                elif key in known and qty >= thr * hyst:
+                    await db.execute(text(
+                        "update inventory_alerts set cleared_at = :now where key = :k"),
+                        {"now": now, "k": key})
+                    out["cleared"] += 1
         await db.commit()
 
     if seeding:
@@ -159,7 +244,9 @@ def _send_digest(rows: List[Dict[str, Any]], cfg: Dict[str, Any]) -> bool:
         "<td style='padding:6px 10px;border-bottom:1px solid #eee;text-align:right;font-weight:600;color:%s'>%d</td>"
         "<td style='padding:6px 10px;border-bottom:1px solid #eee;text-align:right;color:#666'>%d</td>"
         "<td style='padding:6px 10px;border-bottom:1px solid #eee;color:#666'>%s</td></tr>"
-        % (r["name"], "#b42318" if r["qty"] == 0 else "#b54708", r["qty"], r["threshold"], r["sku"].upper())
+        % (r["name"] + ("" if r.get("scope") in (None, "total") else
+                         " <span style='color:#888'>(%s)</span>" % r["scope"]),
+           "#b42318" if r["qty"] == 0 else "#b54708", r["qty"], r["threshold"], r["sku"].upper())
         for r in rows)
     html = (
         "<div style='font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#111'>"

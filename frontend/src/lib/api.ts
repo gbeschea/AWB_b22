@@ -1152,9 +1152,10 @@ export function saveAutomationSchedule(s: Partial<AutomationSchedule>) {
     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s),
   });
 }
+export type InventoryRule = { store: string; sku: string; threshold: number };
 export type InventoryGuard = {
   enabled: boolean; threshold: number; recipients: string[];
-  hysteresis_pct: number; smtp_ready?: boolean;
+  hysteresis_pct: number; smtp_ready?: boolean; rules?: InventoryRule[];
 };
 export function getInventoryGuard() {
   return authFetch<InventoryGuard>(`/api/inventory-guard`);
