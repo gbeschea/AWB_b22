@@ -1551,13 +1551,22 @@ export default function Settings() {
             <p>{error}</p>
           </Banner>
         )}
-        <Card padding="0">
-          <Tabs
-            tabs={TABS.map((t) => ({ id: t.id, content: t.content }))}
-            selected={tabIndex}
-            onSelect={(i) => setSearchParams({ tab: TABS[i].id }, { replace: true })}
-          />
-        </Card>
+        {/* Meniul rămâne pe ecran la derulare: paginile de setări sunt lungi (Automation are
+            programarea + garda de stoc), iar fără asta trebuia să derulezi până sus ca să schimbi
+            tabul. `zIndex` peste conținut, fundalul paginii ca să nu se vadă textul pe sub. */}
+        <div style={{
+          position: "sticky", top: 0, zIndex: 20,
+          background: "var(--p-color-bg)", paddingBottom: "var(--p-space-200)",
+          marginInline: "calc(-1 * var(--p-space-200))", paddingInline: "var(--p-space-200)",
+        }}>
+          <Card padding="0">
+            <Tabs
+              tabs={TABS.map((t) => ({ id: t.id, content: t.content }))}
+              selected={tabIndex}
+              onSelect={(i) => setSearchParams({ tab: TABS[i].id }, { replace: true })}
+            />
+          </Card>
+        </div>
         {TABS[tabIndex].body}
       </BlockStack>
     </Page>

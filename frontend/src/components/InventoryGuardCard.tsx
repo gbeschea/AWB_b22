@@ -1,25 +1,83 @@
-import { useCallback, useEffect, useState } from "react";
-import { BlockStack, Button, Card, Checkbox, InlineGrid, InlineStack, Select, Text, TextField, Banner } from "@shopify/polaris";
-import { getInventoryGuard, saveInventoryGuard, runInventoryGuard, getOverviewStores,
-         type InventoryGuard, type InventoryRule, type InventoryCategory,
-         type InventoryExclusion } from "../lib/api";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Badge, Banner, BlockStack, Box, Button, Card, ChoiceList, Divider, InlineGrid, InlineStack,
+  Select, Text, TextField,
+} from "@shopify/polaris";
+import {
+  getInventoryGuard, saveInventoryGuard, runInventoryGuard, getOverviewStores,
+  type InventoryGuard, type InventoryCategory,
+} from "../lib/api";
 
-type Cfg = InventoryGuard;
+/** O excepție. „Exclus de la gardă" NU e un concept separat — e o excepție cu pragul „niciodată".
+ *  Backend-ul le ține în două liste fiindcă le evaluează diferit; interfața le arată ca una
+ *  singură și le desparte abia la salvare. */
+type Exception = {
+  kind: "alert" | "ignore";
+  store: string; category: string; skus: string[];
+  threshold: number; recipients: string[]; exclude_recipients: string[];
+};
 
 function toast(msg: string, isError = false) {
   (window as unknown as { shopify?: { toast: { show: (m: string, o?: { isError: boolean }) => void } } })
     .shopify?.toast.show(msg, isError ? { isError: true } : undefined);
 }
 
+const csv = (v: string) => v.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
+const shortMail = (e: string) => e.split("@")[0];
+
+function fromCfg(cfg: InventoryGuard): Exception[] {
+  return [
+    ...(cfg.rules ?? []).map((r): Exception => ({
+      kind: "alert", store: r.store || "", category: r.category || "", skus: r.skus || [],
+      threshold: r.threshold, recipients: r.recipients || [],
+      exclude_recipients: r.exclude_recipients || [],
+    })),
+    ...(cfg.exclusions ?? []).map((e): Exception => ({
+      kind: "ignore", store: e.store || "", category: e.category || "", skus: e.skus || [],
+      threshold: 0, recipients: [], exclude_recipients: [],
+    })),
+  ];
+}
+
+function toCfg(cfg: InventoryGuard, list: Exception[]): InventoryGuard {
+  return {
+    ...cfg,
+    rules: list.filter((x) => x.kind === "alert").map((x) => ({
+      store: x.store, category: x.category, skus: x.skus, threshold: x.threshold,
+      recipients: x.recipients, exclude_recipients: x.exclude_recipients,
+    })),
+    exclusions: list.filter((x) => x.kind === "ignore").map((x) => ({
+      store: x.store, category: x.category, skus: x.skus,
+    })),
+  };
+}
+
+/** Rândul închis trebuie să spună TOT ce face regula, într-o propoziție. Altfel „ce reguli am pus?"
+ *  se răspunde doar deschizând fiecare formular pe rând. */
+function summary(x: Exception) {
+  const target = x.store || x.category || "Tot grupul";
+  const what = x.skus.length
+    ? (x.skus.length <= 2 ? x.skus.join(", ").toUpperCase() : `${x.skus.length} produse`)
+    : "toate produsele";
+  return { target, what };
+}
+
 export function InventoryGuardCard() {
-  const [cfg, setCfg] = useState<Cfg | null>(null);
+  const [cfg, setCfg] = useState<InventoryGuard | null>(null);
+  const [list, setList] = useState<Exception[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
   const [stores, setStores] = useState<string[]>([]);
+  const [open, setOpen] = useState<number | null>(null);          // ce excepție e deschisă
+  const [openCat, setOpenCat] = useState<number | null>(null);
+  const [showGroups, setShowGroups] = useState(false);
+  const [editDefault, setEditDefault] = useState(false);
 
-  const [loadError, setLoadError] = useState<string | null>(null);
   useEffect(() => {
-    getInventoryGuard().then(setCfg).catch((e) => setLoadError((e as Error).message || "eroare"));
+    getInventoryGuard()
+      .then((c) => { setCfg(c); setList(fromCfg(c)); })
+      .catch((e) => setLoadError((e as Error).message || "eroare"));
   }, []);
   useEffect(() => {
     getOverviewStores()
@@ -28,20 +86,35 @@ export function InventoryGuardCard() {
       .catch(() => setStores([]));
   }, []);
 
-  const setRules = (fn: (rs: InventoryRule[]) => InventoryRule[]) =>
-    setCfg((c) => (c ? { ...c, rules: fn(c.rules ?? []) } : c));
+  const cats = cfg?.categories ?? [];
   const setCats = (fn: (cs: InventoryCategory[]) => InventoryCategory[]) =>
     setCfg((c) => (c ? { ...c, categories: fn(c.categories ?? []) } : c));
-  const setExcl = (fn: (es: InventoryExclusion[]) => InventoryExclusion[]) =>
-    setCfg((c) => (c ? { ...c, exclusions: fn(c.exclusions ?? []) } : c));
+  const patch = (i: number, p: Partial<Exception>) =>
+    setList((xs) => xs.map((x, j) => (j === i ? { ...x, ...p } : x)));
+
+  // UN singur selector de țintă: două selectoare care se exclud reciproc te pun să ghicești ce se
+  // întâmplă dacă alegi în amândouă.
+  const targetOptions = useMemo(() => [
+    { label: "Tot grupul (stoc total)", value: "" },
+    ...(cats.filter((c) => c.name).length
+      ? [{ title: "Grupuri", options: cats.filter((c) => c.name)
+          .map((c) => ({ label: c.name, value: "c:" + c.name })) }] : []),
+    { title: "Magazine", options: stores.map((s) => ({ label: s, value: "s:" + s })) },
+  ], [cats, stores]);
+  const targetValue = (x: { store: string; category: string }) =>
+    x.store ? "s:" + x.store : x.category ? "c:" + x.category : "";
+  const applyTarget = (v: string) =>
+    v.startsWith("s:") ? { store: v.slice(2), category: "" }
+      : v.startsWith("c:") ? { store: "", category: v.slice(2) }
+        : { store: "", category: "" };
 
   const save = useCallback(async () => {
     if (!cfg) return;
     setSaving(true);
-    try { await saveInventoryGuard(cfg); toast("Setările gărzii de stoc au fost salvate."); }
+    try { await saveInventoryGuard(toCfg(cfg, list)); toast("Setările gărzii de stoc au fost salvate."); }
     catch (e) { toast(`Nu s-a putut salva: ${(e as Error).message}`, true); }
     finally { setSaving(false); }
-  }, [cfg]);
+  }, [cfg, list]);
 
   const runNow = useCallback(async () => {
     setRunning(true);
@@ -54,8 +127,6 @@ export function InventoryGuardCard() {
     finally { setRunning(false); }
   }, []);
 
-  // Fără asta, cardul DISPĂREA în tăcere dacă apelul eșua — te uitai în Settings și pur și simplu
-  // nu era acolo, fără niciun indiciu de ce.
   if (!cfg) {
     return (
       <Card><BlockStack gap="200">
@@ -70,159 +141,228 @@ export function InventoryGuardCard() {
   return (
     <Card>
       <BlockStack gap="400">
-        <InlineStack align="space-between" blockAlign="center">
-          <Text as="h2" variant="headingMd">Gardă de stoc</Text>
+        <InlineStack align="space-between" blockAlign="center" gap="300">
+          <InlineStack gap="200" blockAlign="center">
+            <Text as="h2" variant="headingMd">Gardă de stoc</Text>
+            {cfg.enabled ? <Badge tone="success">Pornită</Badge> : <Badge>Oprită</Badge>}
+          </InlineStack>
           <InlineStack gap="200">
             <Button loading={running} onClick={() => void runNow()}>Verifică acum</Button>
             <Button variant="primary" loading={saving} onClick={() => void save()}>Salvează</Button>
           </InlineStack>
         </InlineStack>
 
-        <Text as="p" tone="subdued">
-          Trimite un email când stocul TOTAL al unui produs scade sub prag. Stocul e suma pe toate
-          magazinele Shopify — Trendyol nu intră în calcul, iar produsele draft sunt sărite.
-          Primești un singur mail per produs, la trecerea sub prag.
-        </Text>
-
         {cfg.smtp_ready === false && (
           <Banner tone="warning"><p>SMTP nu e configurat pe server — alertele nu pot pleca.</p></Banner>
         )}
 
-        <Checkbox label="Alerte pornite" checked={!!cfg.enabled}
-          onChange={(v) => setCfg({ ...cfg, enabled: v })} />
+        {/* ── Implicit ─────────────────────────────────────────────────────────────── */}
+        <Box background="bg-surface-secondary" borderRadius="200" padding="300">
+          <BlockStack gap="300">
+            <InlineStack align="space-between" blockAlign="center" gap="200" wrap={false}>
+              <Text as="span" variant="bodyMd">
+                <b>Implicit:</b> alertează sub <b>{cfg.threshold ?? 50}</b> buc
+                {(cfg.recipients || []).length
+                  ? <> · trimite la <b>{(cfg.recipients || []).map(shortMail).join(", ")}</b></>
+                  : <Text as="span" tone="critical"> · fără destinatari</Text>}
+              </Text>
+              <Button variant="tertiary" onClick={() => setEditDefault((v) => !v)}>
+                {editDefault ? "Gata" : "Editează"}
+              </Button>
+            </InlineStack>
+            {editDefault && (
+              <InlineGrid columns={{ xs: 1, md: "140px 150px 1fr" }} gap="300">
+                <Select label="Alerte" value={cfg.enabled ? "1" : "0"}
+                  options={[{ label: "Pornite", value: "1" }, { label: "Oprite", value: "0" }]}
+                  onChange={(v) => setCfg({ ...cfg, enabled: v === "1" })} />
+                <TextField label="Alertează sub" type="number" autoComplete="off" suffix="buc"
+                  value={String(cfg.threshold ?? 50)}
+                  onChange={(v) => setCfg({ ...cfg, threshold: Number(v) || 0 })} />
+                <TextField label="Trimite la" autoComplete="off" placeholder="nume@arona.ro"
+                  value={(cfg.recipients || []).join(", ")}
+                  onChange={(v) => setCfg({ ...cfg, recipients: csv(v) })} />
+                <Box>
+                  <TextField label="Marjă de re-armare" type="number" autoComplete="off" suffix="%"
+                    value={String(cfg.hysteresis_pct ?? 20)}
+                    onChange={(v) => setCfg({ ...cfg, hysteresis_pct: Number(v) || 0 })}
+                    helpText="Alertă nouă doar după ce urcă peste prag + marja asta." />
+                </Box>
+              </InlineGrid>
+            )}
+          </BlockStack>
+        </Box>
 
-        <InlineStack gap="300">
-          <TextField label="Prag (bucăți)" type="number" autoComplete="off"
-            value={String(cfg.threshold ?? 50)}
-            onChange={(v) => setCfg({ ...cfg, threshold: Number(v) || 0 })} />
-          <TextField label="Marjă de re-armare (%)" type="number" autoComplete="off"
-            value={String(cfg.hysteresis_pct ?? 20)}
-            onChange={(v) => setCfg({ ...cfg, hysteresis_pct: Number(v) || 0 })}
-            helpText="Alertă nouă doar după ce stocul urcă peste prag + marja asta." />
-        </InlineStack>
-
+        {/* ── Excepții ─────────────────────────────────────────────────────────────── */}
         <BlockStack gap="200">
-          <Text as="h3" variant="headingSm">Categorii</Text>
-          <Text as="p" tone="subdued" variant="bodySm">
-            Un grup cu nume, ca să scrii o singură regulă pentru el (ex. „parfumuri").
-            Poți alege magazine, produse anume, sau amândouă.
-          </Text>
-          {(cfg.categories ?? []).map((c, i) => (
-            <InlineGrid key={i} columns={{ xs: 1, sm: "1fr 1.6fr 1.6fr auto" }} gap="200">
-              <TextField label="Nume" labelHidden autoComplete="off" placeholder="nume (ex. parfumuri)"
-                value={c.name}
-                onChange={(v) => setCats((cs) => cs.map((x, j) => (j === i ? { ...x, name: v } : x)))} />
-              <TextField label="Magazine" labelHidden autoComplete="off"
-                placeholder="magazine, separate prin virgulă"
-                value={(c.stores || []).join(", ")}
-                onChange={(v) => setCats((cs) => cs.map((x, j) => (j === i
-                  ? { ...x, stores: v.split(",").map((e) => e.trim()).filter(Boolean) } : x)))} />
-              <TextField label="Produse" labelHidden autoComplete="off"
-                placeholder="SKU-uri anume, separate prin virgulă (opțional)"
-                value={(c.skus || []).join(", ")}
-                onChange={(v) => setCats((cs) => cs.map((x, j) => (j === i
-                  ? { ...x, skus: v.split(",").map((e) => e.trim()).filter(Boolean) } : x)))} />
-              <Button variant="tertiary" tone="critical"
-                onClick={() => setCats((cs) => cs.filter((_, j) => j !== i))}>Șterge</Button>
-            </InlineGrid>
-          ))}
-          <InlineStack>
-            <Button onClick={() => setCats((cs) => [...cs, { name: "", stores: [], skus: [] }])}>
-              Adaugă categorie
-            </Button>
+          <InlineStack align="space-between" blockAlign="center">
+            <Text as="h3" variant="headingSm">{`Excepții (${list.length})`}</Text>
+            <InlineStack gap="200">
+              <Button variant="tertiary" onClick={() => setShowGroups((v) => !v)}>
+                {`Grupuri (${cats.length})`}
+              </Button>
+              <Button onClick={() => { setList((xs) => [...xs, {
+                kind: "alert", store: "", category: "", skus: [],
+                threshold: cfg.threshold ?? 50, recipients: [], exclude_recipients: [],
+              }]); setOpen(list.length); }}>Adaugă</Button>
+            </InlineStack>
           </InlineStack>
+
+          {list.length === 0 && (
+            <Text as="p" tone="subdued" variant="bodySm">
+              Nicio excepție — toate produsele merg pe regula implicită.
+            </Text>
+          )}
+
+          {list.map((x, i) => {
+            const { target, what } = summary(x);
+            const isOpen = open === i;
+            return (
+              <Box key={i} borderWidth="025" borderColor={isOpen ? "border-emphasis" : "border"}
+                borderRadius="200" padding="300">
+                <BlockStack gap={isOpen ? "300" : "0"}>
+                  <InlineStack align="space-between" blockAlign="center" gap="200" wrap={false}>
+                    <InlineStack gap="200" blockAlign="center" wrap={false}>
+                      <Text as="span" variant="bodyMd" fontWeight="semibold">{target}</Text>
+                      <Text as="span" tone="subdued" variant="bodySm">{what}</Text>
+                      {x.kind === "ignore"
+                        ? <Badge tone="warning">fără alerte</Badge>
+                        : <Badge tone="attention">{`sub ${x.threshold} buc`}</Badge>}
+                      {x.kind === "alert" && x.recipients.length > 0 && (
+                        <Text as="span" tone="subdued" variant="bodySm">
+                          {"+ " + x.recipients.map(shortMail).join(", ")}
+                        </Text>
+                      )}
+                      {x.kind === "alert" && x.exclude_recipients.length > 0 && (
+                        <Text as="span" tone="subdued" variant="bodySm">
+                          {"− " + x.exclude_recipients.map(shortMail).join(", ")}
+                        </Text>
+                      )}
+                    </InlineStack>
+                    <InlineStack gap="100">
+                      <Button variant="tertiary" onClick={() => setOpen(isOpen ? null : i)}>
+                        {isOpen ? "Gata" : "Editează"}
+                      </Button>
+                      <Button variant="tertiary" tone="critical"
+                        onClick={() => { setList((xs) => xs.filter((_, j) => j !== i)); setOpen(null); }}>
+                        Șterge
+                      </Button>
+                    </InlineStack>
+                  </InlineStack>
+
+                  {isOpen && (
+                    <BlockStack gap="300">
+                      <Divider />
+                      <InlineGrid columns={{ xs: 1, md: "1.3fr 1.4fr 170px 120px" }} gap="300">
+                        <Select label="Se aplică la" options={targetOptions} value={targetValue(x)}
+                          helpText={x.store ? "Stocul acestui magazin."
+                            : x.category ? "Suma magazinelor din grup." : "Stocul total din grup."}
+                          onChange={(v) => patch(i, applyTarget(v))} />
+                        <TextField label="Produse (SKU)" autoComplete="off"
+                          placeholder="toate, dacă e gol" helpText="Lipește oricâte, separate prin virgulă."
+                          value={x.skus.join(", ")} onChange={(v) => patch(i, { skus: csv(v) })} />
+                        <Select label="Ce facem" value={x.kind}
+                          options={[{ label: "Alertează sub…", value: "alert" },
+                                    { label: "Nu alerta deloc", value: "ignore" }]}
+                          onChange={(v) => patch(i, { kind: v as Exception["kind"] })} />
+                        {x.kind === "alert"
+                          ? <TextField label="Prag" type="number" autoComplete="off" suffix="buc"
+                              value={String(x.threshold)}
+                              onChange={(v) => patch(i, { threshold: Number(v) || 0 })} />
+                          : <div />}
+                      </InlineGrid>
+                      {x.kind === "alert" && (
+                        <InlineGrid columns={{ xs: 1, md: "1fr 1fr" }} gap="300">
+                          <TextField label="Primesc în plus" autoComplete="off" placeholder="cineva@arona.ro"
+                            value={x.recipients.join(", ")}
+                            onChange={(v) => patch(i, { recipients: csv(v) })} />
+                          <TextField label="Nu primesc" autoComplete="off" placeholder="cineva@arona.ro"
+                            helpText="Chiar dacă e în lista implicită."
+                            value={x.exclude_recipients.join(", ")}
+                            onChange={(v) => patch(i, { exclude_recipients: csv(v) })} />
+                        </InlineGrid>
+                      )}
+                    </BlockStack>
+                  )}
+                </BlockStack>
+              </Box>
+            );
+          })}
         </BlockStack>
 
-        <BlockStack gap="200">
-          <Text as="h3" variant="headingSm">Reguli speciale</Text>
-          <Text as="p" tone="subdued" variant="bodySm">
-            O regulă specială ÎNLOCUIEȘTE pragul general pentru ce acoperă — un produs nu apare de
-            două ori. Precedență: magazin &gt; categorie &gt; total. Măsura diferă pe fiecare nivel:
-            magazin = stocul acelui magazin · categorie = suma magazinelor din ea · nimic ales =
-            stocul TOTAL din grup.
-            Poți lipi oricâte SKU-uri într-o regulă — toate primesc același prag. Gol = toate produsele. „În plus la" = cine primește pe lângă destinatarii generali · „Fără" = cine NU
-            primește regula asta, chiar dacă e destinatar general.
-          </Text>
-          {(cfg.rules ?? []).map((r, i) => (
-            <InlineGrid key={i} columns={{ xs: 1, sm: "1fr 1fr 1.8fr 0.5fr 1.3fr 1.3fr auto" }} gap="200">
-              <Select label="Magazin" labelHidden
-                options={[{ label: "— magazin —", value: "" },
-                          ...stores.map((s) => ({ label: s, value: s }))]}
-                value={r.store}
-                onChange={(v) => setRules((rs) => rs.map((x, j) =>
-                  (j === i ? { ...x, store: v, category: v ? "" : x.category } : x)))} />
-              <Select label="Categorie" labelHidden
-                options={[{ label: "— categorie —", value: "" },
-                          ...(cfg.categories ?? []).map((c) => ({ label: c.name, value: c.name }))]}
-                value={r.category}
-                onChange={(v) => setRules((rs) => rs.map((x, j) =>
-                  (j === i ? { ...x, category: v, store: v ? "" : x.store } : x)))} />
-              <TextField label="Produse" labelHidden autoComplete="off" multiline={1}
-                placeholder="SKU-uri (lipește oricâte, separate prin virgulă) — gol = toate"
-                value={(r.skus || []).join(", ")}
-                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i
-                  ? { ...x, skus: v.split(/[,;\n]/).map((e) => e.trim()).filter(Boolean) } : x)))} />
-              <TextField label="Prag" labelHidden type="number" autoComplete="off" placeholder="prag"
-                value={String(r.threshold)}
-                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, threshold: Number(v) || 0 } : x)))} />
-              <TextField label="În plus la" labelHidden autoComplete="off" placeholder="+ email-uri"
-                value={(r.recipients || []).join(", ")}
-                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i
-                  ? { ...x, recipients: v.split(",").map((e) => e.trim()).filter(Boolean) } : x)))} />
-              <TextField label="Fără" labelHidden autoComplete="off" placeholder="− email-uri (scoase)"
-                value={(r.exclude_recipients || []).join(", ")}
-                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i
-                  ? { ...x, exclude_recipients: v.split(",").map((e) => e.trim()).filter(Boolean) } : x)))} />
-              <Button variant="tertiary" tone="critical"
-                onClick={() => setRules((rs) => rs.filter((_, j) => j !== i))}>Șterge</Button>
-            </InlineGrid>
-          ))}
-          <InlineStack>
-            <Button onClick={() => setRules((rs) => [...rs, { store: "", category: "", skus: [], threshold: cfg.threshold ?? 50, recipients: [], exclude_recipients: [] }])}>
-              Adaugă regulă
-            </Button>
-          </InlineStack>
-        </BlockStack>
+        {/* ── Grupuri ──────────────────────────────────────────────────────────────── */}
+        {showGroups && (
+          <BlockStack gap="200">
+            <Divider />
+            <InlineStack align="space-between" blockAlign="center">
+              <BlockStack gap="050">
+                <Text as="h3" variant="headingSm">Grupuri de magazine</Text>
+                <Text as="p" tone="subdued" variant="bodySm">
+                  O singură excepție pentru mai multe magazine. Stocul grupului = suma lor.
+                </Text>
+              </BlockStack>
+              <Button onClick={() => { setCats((cs) => [...cs, { name: "", stores: [], skus: [] }]);
+                setOpenCat(cats.length); }}>Adaugă grup</Button>
+            </InlineStack>
 
-        <BlockStack gap="200">
-          <Text as="h3" variant="headingSm">Excluse de la gardă</Text>
-          <Text as="p" tone="subdued" variant="bodySm">
-            Produse, magazine sau categorii pentru care nu vrei alerte. Excluderea taie alerta, nu
-            schimbă cifra — stocul rămâne numărat în total.
-          </Text>
-          {(cfg.exclusions ?? []).map((e, i) => (
-            <InlineGrid key={i} columns={{ xs: 1, sm: "1fr 1fr 2fr auto" }} gap="200">
-              <Select label="Magazin" labelHidden
-                options={[{ label: "— magazin —", value: "" },
-                          ...stores.map((s) => ({ label: s, value: s }))]}
-                value={e.store}
-                onChange={(v) => setExcl((es) => es.map((x, j) => (j === i ? { ...x, store: v } : x)))} />
-              <Select label="Categorie" labelHidden
-                options={[{ label: "— categorie —", value: "" },
-                          ...(cfg.categories ?? []).map((c) => ({ label: c.name, value: c.name }))]}
-                value={e.category}
-                onChange={(v) => setExcl((es) => es.map((x, j) => (j === i ? { ...x, category: v } : x)))} />
-              <TextField label="Produse" labelHidden autoComplete="off"
-                placeholder="SKU-uri (lipește oricâte)"
-                value={(e.skus || []).join(", ")}
-                onChange={(v) => setExcl((es) => es.map((x, j) => (j === i
-                  ? { ...x, skus: v.split(/[,;\n]/).map((z) => z.trim()).filter(Boolean) } : x)))} />
-              <Button variant="tertiary" tone="critical"
-                onClick={() => setExcl((es) => es.filter((_, j) => j !== i))}>Șterge</Button>
-            </InlineGrid>
-          ))}
-          <InlineStack>
-            <Button onClick={() => setExcl((es) => [...es, { store: "", category: "", skus: [] }])}>
-              Adaugă excludere
-            </Button>
-          </InlineStack>
-        </BlockStack>
+            {cats.map((c, i) => {
+              const isOpen = openCat === i;
+              return (
+                <Box key={i} borderWidth="025" borderColor={isOpen ? "border-emphasis" : "border"}
+                  borderRadius="200" padding="300">
+                  <BlockStack gap={isOpen ? "300" : "0"}>
+                    <InlineStack align="space-between" blockAlign="center" wrap={false}>
+                      <InlineStack gap="200" blockAlign="center">
+                        <Text as="span" variant="bodyMd" fontWeight="semibold">
+                          {c.name || "(fără nume)"}
+                        </Text>
+                        <Text as="span" tone="subdued" variant="bodySm">
+                          {(c.stores || []).length
+                            ? `${(c.stores || []).length} magazine`
+                            : "niciun magazin"}
+                          {(c.skus || []).length ? ` · ${(c.skus || []).length} produse` : ""}
+                        </Text>
+                      </InlineStack>
+                      <InlineStack gap="100">
+                        <Button variant="tertiary" onClick={() => setOpenCat(isOpen ? null : i)}>
+                          {isOpen ? "Gata" : "Editează"}
+                        </Button>
+                        <Button variant="tertiary" tone="critical"
+                          onClick={() => { setCats((cs) => cs.filter((_, j) => j !== i)); setOpenCat(null); }}>
+                          Șterge
+                        </Button>
+                      </InlineStack>
+                    </InlineStack>
 
-        <TextField label="Destinatari" autoComplete="off" multiline={2}
-          placeholder="achizitii@arona.ro, depozit@arona.ro"
-          value={(cfg.recipients || []).join(", ")}
-          onChange={(v) => setCfg({ ...cfg, recipients: v.split(",").map((x) => x.trim()).filter(Boolean) })}
-          helpText="Adrese separate prin virgulă." />
+                    {isOpen && (
+                      <BlockStack gap="300">
+                        <Divider />
+                        <InlineGrid columns={{ xs: 1, md: "240px 1fr" }} gap="300">
+                          <BlockStack gap="300">
+                            <TextField label="Nume" autoComplete="off" placeholder="parfumuri"
+                              value={c.name}
+                              onChange={(v) => setCats((cs) => cs.map((x, j) => (j === i ? { ...x, name: v } : x)))} />
+                            <TextField label="Doar produsele (SKU)" autoComplete="off"
+                              placeholder="toate, dacă e gol" value={(c.skus || []).join(", ")}
+                              onChange={(v) => setCats((cs) => cs.map((x, j) => (j === i ? { ...x, skus: csv(v) } : x)))} />
+                          </BlockStack>
+                          {/* Bifat, nu scris: numele au apostrofuri și diacritice („Maison d'Esteban"),
+                              iar o literă greșită face grupul să nu prindă nimic — tăcut. */}
+                          <div style={{ maxHeight: 200, overflowY: "auto",
+                            border: "1px solid var(--p-color-border)", borderRadius: 8, padding: 12 }}>
+                            <ChoiceList allowMultiple title="Magazine în grup"
+                              choices={stores.map((s) => ({ label: s, value: s }))}
+                              selected={c.stores || []}
+                              onChange={(sel) => setCats((cs) => cs.map((x, j) => (j === i ? { ...x, stores: sel } : x)))} />
+                          </div>
+                        </InlineGrid>
+                      </BlockStack>
+                    )}
+                  </BlockStack>
+                </Box>
+              );
+            })}
+          </BlockStack>
+        )}
       </BlockStack>
     </Card>
   );
