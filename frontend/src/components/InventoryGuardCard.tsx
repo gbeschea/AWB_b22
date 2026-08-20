@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { BlockStack, Button, Card, Checkbox, InlineGrid, InlineStack, Select, Text, TextField, Banner } from "@shopify/polaris";
 import { getInventoryGuard, saveInventoryGuard, runInventoryGuard, getOverviewStores,
-         type InventoryGuard, type InventoryRule } from "../lib/api";
+         type InventoryGuard, type InventoryRule, type InventoryCategory } from "../lib/api";
 
 type Cfg = InventoryGuard;
 
@@ -29,6 +29,8 @@ export function InventoryGuardCard() {
 
   const setRules = (fn: (rs: InventoryRule[]) => InventoryRule[]) =>
     setCfg((c) => (c ? { ...c, rules: fn(c.rules ?? []) } : c));
+  const setCats = (fn: (cs: InventoryCategory[]) => InventoryCategory[]) =>
+    setCfg((c) => (c ? { ...c, categories: fn(c.categories ?? []) } : c));
 
   const save = useCallback(async () => {
     if (!cfg) return;
@@ -97,30 +99,77 @@ export function InventoryGuardCard() {
         </InlineStack>
 
         <BlockStack gap="200">
+          <Text as="h3" variant="headingSm">Categorii</Text>
+          <Text as="p" tone="subdued" variant="bodySm">
+            Un grup cu nume, ca să scrii o singură regulă pentru el (ex. „parfumuri").
+            Poți alege magazine, produse anume, sau amândouă.
+          </Text>
+          {(cfg.categories ?? []).map((c, i) => (
+            <InlineGrid key={i} columns={{ xs: 1, sm: "1fr 1.6fr 1.6fr auto" }} gap="200">
+              <TextField label="Nume" labelHidden autoComplete="off" placeholder="nume (ex. parfumuri)"
+                value={c.name}
+                onChange={(v) => setCats((cs) => cs.map((x, j) => (j === i ? { ...x, name: v } : x)))} />
+              <TextField label="Magazine" labelHidden autoComplete="off"
+                placeholder="magazine, separate prin virgulă"
+                value={(c.stores || []).join(", ")}
+                onChange={(v) => setCats((cs) => cs.map((x, j) => (j === i
+                  ? { ...x, stores: v.split(",").map((e) => e.trim()).filter(Boolean) } : x)))} />
+              <TextField label="Produse" labelHidden autoComplete="off"
+                placeholder="SKU-uri anume, separate prin virgulă (opțional)"
+                value={(c.skus || []).join(", ")}
+                onChange={(v) => setCats((cs) => cs.map((x, j) => (j === i
+                  ? { ...x, skus: v.split(",").map((e) => e.trim()).filter(Boolean) } : x)))} />
+              <Button variant="tertiary" tone="critical"
+                onClick={() => setCats((cs) => cs.filter((_, j) => j !== i))}>Șterge</Button>
+            </InlineGrid>
+          ))}
+          <InlineStack>
+            <Button onClick={() => setCats((cs) => [...cs, { name: "", stores: [], skus: [] }])}>
+              Adaugă categorie
+            </Button>
+          </InlineStack>
+        </BlockStack>
+
+        <BlockStack gap="200">
           <Text as="h3" variant="headingSm">Reguli speciale</Text>
           <Text as="p" tone="subdued" variant="bodySm">
-            Peste pragul general. Fără magazin = pragul se aplică pe stocul TOTAL al produsului din grup.
-            Cu magazin = se aplică pe stocul acelui magazin. Regula cu produs bate regula pe magazin.
+            Peste pragul general. Alege UN nivel de măsurare: fără magazin/categorie = stocul TOTAL
+            din grup · categorie = suma magazinelor din ea · magazin = stocul acelui magazin.
+            Poți lipi oricâte SKU-uri într-o regulă — toate primesc același prag. Gol = toate produsele. „În plus la" = cine primește pe lângă destinatarii
+            generali, doar pentru ce prinde regula asta.
           </Text>
           {(cfg.rules ?? []).map((r, i) => (
-            <InlineGrid key={i} columns={{ xs: 1, sm: 4 }} gap="200">
+            <InlineGrid key={i} columns={{ xs: 1, sm: "1.1fr 1.1fr 2fr 0.6fr 1.5fr auto" }} gap="200">
               <Select label="Magazin" labelHidden
-                options={[{ label: "Toate (stoc total)", value: "" },
+                options={[{ label: "— magazin —", value: "" },
                           ...stores.map((s) => ({ label: s, value: s }))]}
                 value={r.store}
-                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, store: v } : x)))} />
-              <TextField label="SKU" labelHidden autoComplete="off" placeholder="SKU (gol = toate)"
-                value={r.sku}
-                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, sku: v } : x)))} />
+                onChange={(v) => setRules((rs) => rs.map((x, j) =>
+                  (j === i ? { ...x, store: v, category: v ? "" : x.category } : x)))} />
+              <Select label="Categorie" labelHidden
+                options={[{ label: "— categorie —", value: "" },
+                          ...(cfg.categories ?? []).map((c) => ({ label: c.name, value: c.name }))]}
+                value={r.category}
+                onChange={(v) => setRules((rs) => rs.map((x, j) =>
+                  (j === i ? { ...x, category: v, store: v ? "" : x.store } : x)))} />
+              <TextField label="Produse" labelHidden autoComplete="off" multiline={1}
+                placeholder="SKU-uri (lipește oricâte, separate prin virgulă) — gol = toate"
+                value={(r.skus || []).join(", ")}
+                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i
+                  ? { ...x, skus: v.split(/[,;\n]/).map((e) => e.trim()).filter(Boolean) } : x)))} />
               <TextField label="Prag" labelHidden type="number" autoComplete="off" placeholder="prag"
                 value={String(r.threshold)}
                 onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i ? { ...x, threshold: Number(v) || 0 } : x)))} />
+              <TextField label="În plus la" labelHidden autoComplete="off" placeholder="email-uri în plus"
+                value={(r.recipients || []).join(", ")}
+                onChange={(v) => setRules((rs) => rs.map((x, j) => (j === i
+                  ? { ...x, recipients: v.split(",").map((e) => e.trim()).filter(Boolean) } : x)))} />
               <Button variant="tertiary" tone="critical"
                 onClick={() => setRules((rs) => rs.filter((_, j) => j !== i))}>Șterge</Button>
             </InlineGrid>
           ))}
           <InlineStack>
-            <Button onClick={() => setRules((rs) => [...rs, { store: "", sku: "", threshold: cfg.threshold ?? 50 }])}>
+            <Button onClick={() => setRules((rs) => [...rs, { store: "", category: "", skus: [], threshold: cfg.threshold ?? 50, recipients: [] }])}>
               Adaugă regulă
             </Button>
           </InlineStack>

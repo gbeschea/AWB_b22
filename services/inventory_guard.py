@@ -35,7 +35,8 @@ from database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
-DEFAULTS = {"enabled": False, "threshold": 50, "recipients": [], "hysteresis_pct": 20, "rules": []}
+DEFAULTS = {"enabled": False, "threshold": 50, "recipients": [], "hysteresis_pct": 20,
+            "rules": [], "categories": []}
 _VARIANTS_Q = """
 query($cursor: String) {
   productVariants(first: 250, after: $cursor) {
@@ -101,8 +102,17 @@ async def _stock_by_sku() -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def _emails(raw: Any) -> List[str]:
+    lst = raw if isinstance(raw, list) else str(raw or "").replace(";", ",").split(",")
+    return [a.strip() for a in lst if a and "@" in str(a)]
+
+
 def sanitize_rules(raw: Any) -> List[Dict[str, Any]]:
-    """Curăță regulile venite din UI: {store?, sku?, threshold}. `store`/`sku` goale = „oricare"."""
+    """Curăță regulile din UI: {store?, category?, sku?, threshold, recipients?}.
+
+    Ținta poate fi un magazin, o CATEGORIE de magazine (ex. „parfumuri") sau un produs. `recipients`
+    = oameni care primesc ÎN PLUS față de destinatarii generali, doar pentru ce prinde regula asta.
+    """
     out: List[Dict[str, Any]] = []
     for r in (raw if isinstance(raw, list) else []):
         if not isinstance(r, dict):
@@ -114,42 +124,76 @@ def sanitize_rules(raw: Any) -> List[Dict[str, Any]]:
         if thr < 0:
             continue
         store = (str(r.get("store") or "")).strip()
-        sku = (str(r.get("sku") or "")).strip().lower()
-        if not store and not sku:
+        cat = (str(r.get("category") or "")).strip()
+        # O regulă acoperă o LISTĂ de produse, nu unul singur: „magazinul X, aceste 20 de SKU-uri,
+        # pragul N" e o singură regulă, nu douăzeci. Acceptăm și forma veche cu un `sku`.
+        raw_skus = r.get("skus")
+        if raw_skus is None:
+            raw_skus = [r.get("sku")] if r.get("sku") else []
+        if isinstance(raw_skus, str):
+            raw_skus = raw_skus.replace(";", ",").replace("\n", ",").split(",")
+        skus = sorted({str(x).strip().lower() for x in (raw_skus or []) if str(x).strip()})
+        if not store and not cat and not skus:
             continue          # o regulă fără țintă e pragul implicit, care se setează separat
-        out.append({"store": store, "sku": sku, "threshold": thr})
+        out.append({"store": store, "category": cat, "skus": skus, "threshold": thr,
+                    "recipients": _emails(r.get("recipients"))})
     return out
 
 
-def _store_rule(rules: List[Dict[str, Any]], sku: str, store: str) -> Optional[int]:
-    """Pragul pentru FELIA unui magazin — DOAR din reguli care numesc explicit magazinul.
+def sanitize_categories(raw: Any) -> List[Dict[str, Any]]:
+    """O categorie = CE MAGAZINE intră la socoteală × CE PRODUSE acoperă.
 
-    Fără regulă explicită nu alertăm per magazin. Altfel, un produs împărțit în 8 felii mici ar
-    declanșa 8 alerte pentru marfă care, în grup, e suficientă — exact zgomotul pe care garda
-    trebuie să-l evite. Între regulile care numesc magazinul, cea cu produs bate cea generală.
+    Ambele liste sunt opționale, și fiecare combinație are sens:
+      stores=[Esteban, GT, Lab Noir, Nubra], skus=[]   → „parfumuri" ca grup de magazine
+      stores=[], skus=[ZN-78, GT-35, …]                → parfumuri ANUME, pe tot grupul
+      ambele                                           → acele produse, doar pe acele magazine
+    Fără niciuna, categoria n-ar însemna nimic, deci o sărim.
+    """
+    out: List[Dict[str, Any]] = []
+    for c in (raw if isinstance(raw, list) else []):
+        if not isinstance(c, dict):
+            continue
+        nm = (str(c.get("name") or "")).strip()
+        stores = [str(x).strip() for x in (c.get("stores") or []) if str(x).strip()]
+        skus = [str(x).strip().lower() for x in (c.get("skus") or []) if str(x).strip()]
+        if nm and (stores or skus):
+            out.append({"name": nm, "stores": stores, "skus": skus})
+    return out
+
+
+def _category_map(cfg: Dict[str, Any]) -> Dict[str, Dict[str, List[str]]]:
+    return {c["name"].lower(): {"stores": c["stores"], "skus": c["skus"]}
+            for c in sanitize_categories(cfg.get("categories"))}
+
+
+def _pick(rules: List[Dict[str, Any]], sku: str, *, store: Optional[str],
+          category: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Regula care se aplică pe un ANUME nivel de măsurare, cea mai specifică dintre cele potrivite.
+
+    Nivelurile nu se amestecă, fiindcă măsoară lucruri diferite: „total" e marfa din tot grupul,
+    „categorie" e suma unui subset de magazine, „magazin" e o singură felie. O regulă scrisă pentru
+    un magazin n-are ce căuta pe total — acolo ar însemna altceva decât a cerut merchantul.
+    La egalitate de nivel, regula cu produs bate regula fără produs.
     """
     best, best_rank = None, -1
     for r in rules:
-        r_store, r_sku = (r.get("store") or ""), (r.get("sku") or "")
-        if not r_store or r_store.lower() != (store or "").lower():
+        r_store, r_cat = (r.get("store") or ""), (r.get("category") or "")
+        r_skus = r.get("skus") or []
+        if store is not None:
+            if not r_store or r_store.lower() != store.lower():
+                continue
+        elif category is not None:
+            if not r_cat or r_cat.lower() != category.lower():
+                continue
+        else:
+            if r_store or r_cat:
+                continue
+        if r_skus and sku not in r_skus:
             continue
-        if r_sku and r_sku != sku:
-            continue
-        rank = 1 if r_sku else 0
+        rank = 1 if r_skus else 0
         if rank > best_rank:
-            best, best_rank = r["threshold"], rank
+            best, best_rank = r, rank
     return best
-
-
-def _rule_for(rules: List[Dict[str, Any]], sku: str, store: Optional[str]) -> Optional[int]:
-    """Pragul pe TOTALUL din grup: doar reguli care vizează produsul, fără magazin.
-    O regulă cu magazin nu se aplică pe total — acolo felia magazinului e unitatea de măsură."""
-    for r in rules:
-        if (r.get("store") or ""):
-            continue
-        if (r.get("sku") or "") == sku:
-            return r["threshold"]
-    return None
 
 
 async def run_once() -> Dict[str, Any]:
@@ -175,34 +219,47 @@ async def run_once() -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
 
         rules = sanitize_rules(cfg.get("rules"))
-
-        def _record(key, store_label, sku, name, qty, thr):
-            """Alertă nouă doar dacă nu e deja deschisă pe ACEEAȘI cheie. Cheia include magazinul,
-            ca o regulă pe MagDeal să nu tacă din cauza unei alerte deschise pe total (și invers)."""
-            if key in known:
-                return False
-            fresh.append({"name": name, "sku": sku, "qty": qty, "threshold": thr,
-                          "scope": store_label or "total"})
-            return True
+        cats = _category_map(cfg)
+        base_rcpt = _emails(cfg.get("recipients"))
 
         for sku, info in stock.items():
             out["checked"] += 1
             name = info.get("name") or sku
+            per_store = info.get("stores") or {}
 
-            # 1. pe TOTALUL din grup — pragul produsului dacă are regulă, altfel cel implicit
-            thr_total = _rule_for(rules, sku, None)
-            thr_total = default_thr if thr_total is None else thr_total
-            checks = [("total", None, int(info["total"]), thr_total)]
+            # Ce verificăm pentru produsul ăsta: (cheie, etichetă, cantitate, prag, destinatari-extra)
+            checks = []
 
-            # 2. pe FELIA fiecărui magazin — DOAR dacă merchantul a scris o regulă pentru magazinul
-            #    ăla. Fără regulă explicită nu alertăm per magazin: altfel un produs împărțit în 8
-            #    felii mici ar declanșa 8 alerte pentru marfă care în grup e suficientă.
-            for store_label, qty in (info.get("stores") or {}).items():
-                thr_s = _store_rule(rules, sku, store_label)
-                if thr_s is not None:
-                    checks.append((store_label, store_label, int(qty), thr_s))
+            # 1. TOTALUL din grup — pragul produsului dacă are regulă proprie, altfel cel implicit
+            r_tot = _pick(rules, sku, store=None, category=None)
+            checks.append(("total", None, int(info["total"]),
+                           default_thr if r_tot is None else r_tot["threshold"],
+                           (r_tot or {}).get("recipients") or []))
 
-            for key_scope, store_label, qty, thr in checks:
+            # 2. CATEGORII — suma feliilor magazinelor din categorie. O categorie se măsoară ca GRUP,
+            #    nu magazin cu magazin: altfel „parfumuri sub 50" ar da 4 alerte pentru același produs.
+            for cname, cdef in cats.items():
+                if cdef["skus"] and sku not in cdef["skus"]:
+                    continue                      # categoria acoperă produse anume, ăsta nu e printre ele
+                r_cat = _pick(rules, sku, store=None, category=cname)
+                if r_cat is None:
+                    continue                      # categoria există, dar n-are regulă → nu verificăm
+                members = [s for s in cdef["stores"]] or list(per_store.keys())
+                qty = sum(per_store.get(m, 0) for m in members)
+                if not any(m in per_store for m in members):
+                    continue                      # produsul nu se vinde pe magazinele categoriei
+                checks.append(("cat:" + cname, cname, int(qty), r_cat["threshold"],
+                               r_cat.get("recipients") or []))
+
+            # 3. MAGAZINE — doar unde merchantul a scris o regulă anume pe magazinul ăla.
+            for store_label, qty in per_store.items():
+                r_st = _pick(rules, sku, store=store_label, category=None)
+                if r_st is None:
+                    continue
+                checks.append((store_label, store_label, int(qty), r_st["threshold"],
+                               r_st.get("recipients") or []))
+
+            for key_scope, label, qty, thr, extra in checks:
                 key = "%s|%s" % (key_scope, sku)
                 if qty < thr:
                     out["low"] += 1
@@ -213,9 +270,11 @@ async def run_once() -> Dict[str, Any]:
                         values (:k, :s, :st, :n, :q, :t, :now)
                         on conflict (key) do update set qty = :q, threshold = :t,
                             alerted_at = :now, cleared_at = null"""),
-                        {"k": key, "s": sku, "st": store_label, "n": name[:300],
+                        {"k": key, "s": sku, "st": label, "n": name[:300],
                          "q": qty, "t": thr, "now": now})
-                    _record(key, store_label, sku, name, qty, thr)
+                    fresh.append({"name": name, "sku": sku, "qty": qty, "threshold": thr,
+                                  "scope": label or "total",
+                                  "to": sorted(set(base_rcpt) | set(extra))})
                     out["new_alerts"] += 1
                 elif key in known and qty >= thr * hyst:
                     await db.execute(text(
@@ -230,13 +289,24 @@ async def run_once() -> Dict[str, Any]:
         logger.info("garda-stoc: linie de bază — %d produse deja sub prag, înregistrate FĂRĂ email. "
                     "De acum alertăm doar la trecerile noi.", out["baseline"])
     elif fresh:
-        out["emailed"] = _send_digest(fresh, cfg)
+        # Un email per SET DE DESTINATARI, nu unul singur către toți: regula pe „parfumuri" poate
+        # avea alt om decât cea pe Grandia, iar oamenii ăia n-au de ce să vadă restul catalogului.
+        groups: Dict[tuple, List[Dict[str, Any]]] = {}
+        for r in fresh:
+            groups.setdefault(tuple(r.get("to") or []), []).append(r)
+        sent = 0
+        for to, rows in groups.items():
+            if to and _send_digest(rows, cfg, list(to)):
+                sent += 1
+        out["emailed"] = sent > 0
+        out["emails"] = sent
     if out["new_alerts"] or out["cleared"]:
         logger.info("garda-stoc: %s", out)
     return out
 
 
-def _send_digest(rows: List[Dict[str, Any]], cfg: Dict[str, Any]) -> bool:
+def _send_digest(rows: List[Dict[str, Any]], cfg: Dict[str, Any],
+                 to: Optional[List[str]] = None) -> bool:
     from services import mailer
     rows = sorted(rows, key=lambda r: r["qty"])
     trs = "".join(
@@ -264,4 +334,4 @@ def _send_digest(rows: List[Dict[str, Any]], cfg: Dict[str, Any]) -> bool:
         % (len(rows), trs))
     txt = "\n".join("%s — %d buc (prag %d)" % (r["name"], r["qty"], r["threshold"]) for r in rows)
     return mailer.send("Stoc sub prag: %d produse" % len(rows), html,
-                       cfg.get("recipients") or [], body_text=txt)
+                       to if to is not None else (cfg.get("recipients") or []), body_text=txt)
