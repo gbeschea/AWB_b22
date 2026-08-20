@@ -33,6 +33,25 @@ logger = logging.getLogger(__name__)
 XBASE = "https://xconnector.app"
 
 
+def _main_awb(tracking) -> str:
+    """AWB-ul PĂRINTE dintr-o etichetă multi-colet.
+
+    La `parcelCount > 1`, xConnector întoarce TOATE numerele lipite cu „-":
+    „81348769354-81348769350026-81348769350035". Primul e cel părinte — singurul pe care-l pune Shopify
+    pe fulfillment și singurul pe care-l urmărește DPD. Dacă păstrăm șirul întreg, webhook-ul Shopify
+    (care aduce doar numărul părinte) nu-l mai potrivește cu rândul nostru și creează un AL DOILEA
+    shipment pentru aceeași expediere — s-a întâmplat pe MAG33024, primul AWB cu 3 colete.
+
+    Despicăm DOAR când toate segmentele sunt numerice, ca să nu stricăm curierii cu cratimă în AWB.
+    Șirul complet rămâne oricum în `raw` (→ courier_specific_data), deci nu se pierde nimic.
+    """
+    s = str(tracking or "").strip()
+    if "-" not in s:
+        return s
+    parts = [p for p in s.split("-") if p]
+    return parts[0] if len(parts) > 1 and all(p.isdigit() for p in parts) else s
+
+
 class XConnectorCourier(BaseCourier):
     name = "xconnector"
     display_name = "xConnector (punte AWB + facturi)"
@@ -260,7 +279,8 @@ class XConnectorCourier(BaseCourier):
             msg = self._err(d) or (good and good[0].get("errorMessage")) or "respins"
             return {"success": False, "message": msg, "raw": d}
         L = good[0]
-        return {"success": True, "awb": L.get("trackingNumber"), "tracking_number": L.get("trackingNumber"),
+        tn = _main_awb(L.get("trackingNumber"))
+        return {"success": True, "awb": tn, "tracking_number": tn,
                 "carrier": L.get("carrierName"), "label_url": L.get("shippingLabelUrl"),
                 "price": L.get("price"), "connector_id": con["id"], "raw": d}
 
